@@ -26,16 +26,19 @@
     "statusline",
     "hooks"
   ],
-  "author": "liuchenlili",
+  "author": "CharleyLeo",
+  "contributors": [
+    "liuchenlili (original author of ClaudePet, https://github.com/liuchenlili/ClaudePet)"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/liuchenlili/ClaudePet.git"
+    "url": "git+https://github.com/CharleyLeo/ClaudePet2.git"
   },
   "bugs": {
-    "url": "https://github.com/liuchenlili/ClaudePet/issues"
+    "url": "https://github.com/CharleyLeo/ClaudePet2/issues"
   },
-  "homepage": "https://github.com/liuchenlili/ClaudePet#readme",
+  "homepage": "https://github.com/CharleyLeo/ClaudePet2#readme",
   "devDependencies": {
     "electron": "^42.0.0"
   }
