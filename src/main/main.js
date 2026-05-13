@@ -160,6 +160,18 @@ function maybeNotify(status) {
       if (petWindow && !petWindow.isDestroyed()) petWindow.flashFrame(false);
     }, 2500);
   }
+  playNotificationSound(category);
+}
+
+function playNotificationSound(category) {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const settings = (config.notifications && config.notifications.customSound) || {};
+  if (!settings.enabled) return;
+  petWindow.webContents.send("claudepet:play-sound", {
+    preset: settings.preset || "ding",
+    volume: typeof settings.volume === "number" ? settings.volume : 0.6,
+    category
+  });
 }
 
 async function handleBridgeEvent(event) {

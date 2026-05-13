@@ -18,7 +18,12 @@ const DEFAULT_CONFIG = {
     flashWindow: true,
     onComplete: true,
     onPermission: true,
-    onError: true
+    onError: true,
+    customSound: {
+      enabled: true,
+      preset: "ding",
+      volume: 0.6
+    }
   },
   fields: {
     session: true,

@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const { loadConfig } = require("./shared/config");
 const { installSettings, uninstallSettings } = require("./shared/install");
@@ -24,14 +25,27 @@ function parseJson(text) {
   return JSON.parse(text);
 }
 
+function findBashShell() {
+  if (process.platform !== "win32") return null;
+  const candidates = [
+    process.env.CLAUDEPET_LEGACY_SHELL,
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files (x86)\\Git\\bin\\bash.exe"
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function runLegacyStatusLine(command, input, timeoutMs = 2200) {
   return new Promise((resolve) => {
     if (!command) return resolve(null);
-    const child = spawn(command, [], {
-      shell: true,
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true
-    });
+    const bash = findBashShell();
+    const child = bash
+      ? spawn(bash, ["-c", command], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
+      : spawn(command, [], { shell: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
     let stdout = "";
     let done = false;
     const timer = setTimeout(() => {

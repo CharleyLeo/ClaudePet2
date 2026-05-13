@@ -4,7 +4,9 @@
 >
 > 所有改动只覆盖渲染层、主进程的窗口/通知逻辑与少量配置项，未改动 `bridge / hook / statusline / pet manifest` 等原有协议；卸载逻辑与原版兼容。
 >
-> 详细改动可见 [`docs/drag-run-toggle.md`](docs/drag-run-toggle.md)。
+> 本项目仅用于技术研究学习之用，请勿用于商业用途，所以项目不会做任何适配！只保证在笔者手机上是可以正常运行的，代码开源，有问题或者建议欢迎提issues。
+>
+> 详细改动可见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
 
 Claude Code 桌面宠物。通过 Claude Code 的 `statusLine` 和 `hooks` 把会话状态、上下文用量、git 状态、token 消耗、任务进度、需要注意的提示等显示在一个 Electron 小窗口里。支持 Windows / macOS / Linux。
 

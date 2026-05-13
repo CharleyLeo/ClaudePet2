@@ -55,12 +55,24 @@ function buildHookEntry(matcher, command) {
   return entry;
 }
 
+function refreshCcpetCommands(entry, hookCommand) {
+  if (!entry || !Array.isArray(entry.hooks)) return entry;
+  const hooks = entry.hooks.map((hook) => {
+    if (hook && hook.type === "command" && isClaudepetCommand(hook.command) && hook.command !== hookCommand) {
+      return { ...hook, command: hookCommand };
+    }
+    return hook;
+  });
+  return { ...entry, hooks };
+}
+
 function mergeHooks(settings, hookCommand) {
   const hooks = { ...(settings.hooks || {}) };
   for (const [event, matcher] of Object.entries(HOOK_EVENTS)) {
     const existing = Array.isArray(hooks[event]) ? hooks[event].slice() : [];
-    if (!existing.some(hasCcpetHook)) existing.push(buildHookEntry(matcher, hookCommand));
-    hooks[event] = existing;
+    const refreshed = existing.map((entry) => (hasCcpetHook(entry) ? refreshCcpetCommands(entry, hookCommand) : entry));
+    if (!refreshed.some(hasCcpetHook)) refreshed.push(buildHookEntry(matcher, hookCommand));
+    hooks[event] = refreshed;
   }
   return hooks;
 }

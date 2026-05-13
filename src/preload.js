@@ -16,5 +16,10 @@ contextBridge.exposeInMainWorld("claudepet", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("claudepet:update", listener);
     return () => ipcRenderer.removeListener("claudepet:update", listener);
+  },
+  onPlaySound: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("claudepet:play-sound", listener);
+    return () => ipcRenderer.removeListener("claudepet:play-sound", listener);
   }
 });

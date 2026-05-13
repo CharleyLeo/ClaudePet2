@@ -956,6 +956,26 @@ button:hover {
   font-size: 11px;
 }
 
+.sound-picker {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sound-picker select {
+  flex: 1;
+}
+
+.sound-picker .sound-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
 .anim-list {
   display: grid;
   gap: 10px;

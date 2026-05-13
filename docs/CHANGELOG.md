@@ -1,10 +1,18 @@
-# 拖动桌宠相关问题修复记录
+# ClaudePet 改动记录（滚动）
 
-> 本文档记录三个相关问题的完整排查与修复过程：
-> 1. 拖动时窗口"横向越来越大、宠物离窗口边缘越来越远"（真凶）
-> 2. 拖动时的奔跑（run）动画开关 —— 已重新启用
-> 3. 应用菜单中文化 —— 见末尾章节
-> 4. 已知遗留问题：切换 Claude Code 会话窗口时桌宠仍显示旧目录的聊天
+> 本文档把项目的每一轮排查、修复与新功能集中放在一处，避免散在多个文件里翻不到。按章节阅读即可，新增改动追加到文末。
+
+**目录**
+
+- 一、真凶：拖动时窗口持续横向放大
+- 二、拖动时的"奔跑"动画（已重新启用）
+- 三、应用菜单中文化
+- 三点五、通知体系改造（A. hooks 没装 / B. 增强 maybeNotify / C. 启动清理 stale state）
+- 四、已知遗留问题：切换 Claude Code 会话时显示旧目录的内容
+- 五、整体验证清单
+- 六、项目重命名（ClaudePet → ClaudePet2）：迁移与 install bug 修复
+- 七、Windows 上 legacy statusLine 兼容（Git Bash 检测）
+- 八、自定义通知提示音
 
 ---
 
@@ -426,3 +434,309 @@ ClaudePet 的渲染状态由 `src/main/main.js` 里的全局 `state` 维护：
 3. **拖动时 pointer 滑出窗口**：快速把鼠标滑到屏外再滑回，不应出现明显跳跃。
 4. **应用菜单**：设置中心顶部菜单显示为中文（文件 / 编辑 / 视图 / 窗口 / 帮助），「窗口」下拉为「最小化 / 缩放 / 关闭」。
 5. **多 Claude Code 窗口**：当前为已知限制（见第四节），切焦点不会刷新桌宠气泡。
+6. **路径迁移自愈**（见第六节）：在新目录跑 `claudepet install --scope user` 后，`~/.claude/settings.json` 里 14 个 hook 全部指向新路径，HP 进度条能随 token 用量爬升。
+7. **命令行 statusLine**（见第七节）：Claude Code 终端底部状态行仍由 claude-hud 渲染（而非 claudepet 的 fallback `Opus 4.x | <项目> | ctx ...`）。
+8. **通知提示音**（见第八节）：设置中心 → 「显示设置」→ 「提示音」预览能听到所选音色；点「测试：完成通知」时系统通知 + wav 同时响一次。
+
+---
+
+## 六、项目重命名（ClaudePet → ClaudePet2）：迁移与 install bug 修复
+
+### 现象
+
+用户把项目文件夹从 `D:\tools\ClaudePet` 改名为 `D:\tools\ClaudePet2` 后，出现一连串问题：
+
+- 桌宠 HP 进度条不更新；
+- `claude --continue` 在新目录下找不到旧会话历史；
+- `claudepet start` 跑的还是旧目录的代码（虽然新代码在跑，但行为像旧版）；
+- 重新执行 `claudepet install --scope user --preserve-statusline` 之后，settings.json 的 statusLine 字段被正确更新到新路径，**hooks 字段依然指向旧路径**。
+
+### 根因有四条互相耦合
+
+1. **PowerShell `$PROFILE` 里的 shim 写死了旧路径**：
+   `C:\Users\charley\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1` 里有
+   ```powershell
+   function claudepet { node D:\tools\ClaudePet\bin\claudepet.js @args }
+   ```
+   于是终端敲的 `claudepet ...` 都走旧目录的代码。
+
+2. **`~/.claude/settings.json` 的 14 个 hook 项仍指向旧路径**。Claude Code 触发事件时调用的是旧仓库里的 `bin/claudepet.js`，事件不会进新版的 bridge。
+
+3. **statusLine 被 `claude-hud` 插件占用**（非 claudepet）。但 HP 条的 `usedPercentage` 是 `buildStatusLineState`（`src/shared/state.js`）解析 statusLine 输入里 `context_window` 字段得到的——claudepet 拿不到这个数据流，HP 就停在历史快照上。
+
+4. **`src/shared/install.js` 的 `mergeHooks` 有一个老 bug**：
+   ```js
+   if (!existing.some(hasCcpetHook)) existing.push(buildHookEntry(matcher, hookCommand));
+   ```
+   检测到已存在含 `claudepet.js` 的 hook 就直接跳过，**不会把旧路径换成新路径**。所以哪怕重新跑 `install`，hook 路径也不刷新。
+
+5. **Claude Code 按 cwd 路径分项目存会话**（`~/.claude/projects/<打平的路径>/`）。`D--tools-ClaudePet` 和 `D--tools-ClaudePet2` 是两个独立 project key，重命名后 `claude --continue` 在新 key 下找不到任何会话。
+
+### 修复
+
+#### 1. `src/shared/install.js` — `mergeHooks` 改成会刷新已有路径
+
+新增 `refreshCcpetCommands(entry, hookCommand)`：
+
+```js
+function refreshCcpetCommands(entry, hookCommand) {
+  if (!entry || !Array.isArray(entry.hooks)) return entry;
+  const hooks = entry.hooks.map((hook) => {
+    if (hook && hook.type === "command" && isClaudepetCommand(hook.command) && hook.command !== hookCommand) {
+      return { ...hook, command: hookCommand };
+    }
+    return hook;
+  });
+  return { ...entry, hooks };
+}
+
+function mergeHooks(settings, hookCommand) {
+  const hooks = { ...(settings.hooks || {}) };
+  for (const [event, matcher] of Object.entries(HOOK_EVENTS)) {
+    const existing = Array.isArray(hooks[event]) ? hooks[event].slice() : [];
+    const refreshed = existing.map((entry) => (hasCcpetHook(entry) ? refreshCcpetCommands(entry, hookCommand) : entry));
+    if (!refreshed.some(hasCcpetHook)) refreshed.push(buildHookEntry(matcher, hookCommand));
+    hooks[event] = refreshed;
+  }
+  return hooks;
+}
+```
+
+要点：
+- **先对所有已有 entry 做一次 refresh**（把旧 path 覆写成新 path），再判断要不要 append。
+- 用 `hook.command !== hookCommand` 跳过已经是最新值的 hook，避免无谓的对象重建。
+- 不动其他非 claudepet 的 hook（比如用户自己装的其它工具）。
+
+#### 2. 一次性迁移（手动 + 命令）
+
+| 步骤 | 操作 |
+| --- | --- |
+| a. PROFILE 函数指向新路径 | 把 `Microsoft.PowerShell_profile.ps1` 里的 `D:\tools\ClaudePet` 改成 `D:\tools\ClaudePet2`，下次开 PowerShell 或 `. $PROFILE` 生效 |
+| b. 恢复旧会话 | `cp ~/.claude/projects/D--tools-ClaudePet/*.jsonl ~/.claude/projects/D--tools-ClaudePet2/` |
+| c. 让 claudepet 接管 statusLine 同时保留 claude-hud 渲染 | 在 `D:\tools\ClaudePet2` 下跑 `node bin/claudepet.js install --scope user --preserve-statusline` |
+| d. 修复 hooks 旧路径残留 | `mergeHooks` 修了之后再跑一次 install 即可；修之前需要手动 grep + 替换 settings.json |
+
+#### 3. 验证
+
+- `~/.claude/settings.json` 里 `grep ClaudePet`，只应出现 `ClaudePet2`；
+- 打开 Claude Code 跑一段对话，HP 条会随着 token 用量爬升；
+- `claude --continue` 在新目录下能恢复之前那条历史会话；
+- 终端 `claudepet doctor` 输出指向 `~/.claudepet/`，且 Electron 路径可见。
+
+### 将来再次改项目目录怎么办
+
+修好 `mergeHooks` 之后流程极简：
+
+1. PROFILE 函数路径同步；
+2. 旧 project 目录的 `.jsonl` 搬过来（如要保留会话）；
+3. 跑 `claudepet install --scope user [--preserve-statusline]` —— 一次同步 statusLine + 14 个 hook + backup。
+
+---
+
+## 七、Windows 上 legacy statusLine 兼容（Git Bash 检测）
+
+### 现象
+
+执行 `install --preserve-statusline` 后，`~/.claudepet/config.json` 里有 `legacyStatusLine.command`（claude-hud 的命令），按理 cli.js 在最后会调用它并把输出写回 stdout 给 Claude Code 显示。可是 Claude Code 终端 statusLine 显示的是 ClaudePet 的 fallback 文本（`Opus 4.7 | ClaudePet2 | ctx 9% | in ...`），不是 claude-hud 的样式。
+
+### 根因
+
+`src/cli.js` 的 `runLegacyStatusLine` 用 `spawn(command, [], { shell: true, ... })`。在 Node.js Windows 上 `shell: true` 默认使用 `cmd.exe`。而 claude-hud 的 statusLine 命令是 bash 语法：
+
+```bash
+cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+export COLUMNS=$(( ${cols:-120} > 4 ? ${cols:-120} - 4 : 1 ))
+plugin_dir=$(ls -1d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/claude-hud/*/ 2>/dev/null | sort -V | tail -1)
+exec "/c/Program Files/nodejs/node" "${plugin_dir}dist/index.js"
+```
+
+`$(...)` / `${var:-default}` / `/c/Program Files/...` / `exec` 在 cmd.exe 下全部解析失败，子进程直接挂掉返回空字符串 → 触发 cli.js 的 fallback。
+
+> Claude Code 本身没问题——它自己的 statusLine 执行环境是 bash（Git Bash），所以原配置可以正常工作。问题只出现在 claudepet 转发的那一层。
+
+### 修复
+
+`src/cli.js` 新增 `findBashShell()`：
+
+```js
+function findBashShell() {
+  if (process.platform !== "win32") return null;
+  const candidates = [
+    process.env.CLAUDEPET_LEGACY_SHELL,
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files (x86)\\Git\\bin\\bash.exe"
+  ];
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+```
+
+`runLegacyStatusLine` 改用动态 spawn：
+
+```js
+const bash = findBashShell();
+const child = bash
+  ? spawn(bash, ["-c", command], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
+  : spawn(command, [], { shell: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+```
+
+要点：
+- 优先用 Git Bash 跑 `bash -c <command>`；
+- 找不到 bash 才退回 `shell: true`（适用于 macOS / Linux，以及命令本身就兼容 cmd 的边缘情况）；
+- 支持 `CLAUDEPET_LEGACY_SHELL` 环境变量自定义 shell 路径，方便用 WSL bash / MSYS2 等。
+
+### 验证
+
+```bash
+echo '{"context_window":{"used_percentage":9,...}}' | node bin/claudepet.js statusline
+```
+
+应输出 `[claude-hud] 正在初始化...` 这类 claude-hud 的产物（首次启动）或正式 statusLine 行，而不是 `Opus 4.7 | ClaudePet2 | ctx ... | ...` 的 fallback。
+
+实际使用上：等 2 秒（Claude Code statusLine refreshInterval = 2），命令行 statusLine 会自动恢复 claude-hud 样式；桌宠仍能拿到 `context_window` 数据正常更新 HP。
+
+---
+
+## 八、自定义通知提示音
+
+### 背景
+
+用户参考开源 IDE 插件 [jetbrains-cc-gui](https://github.com/zhukunpenglinyutong/jetbrains-cc-gui) 的"任务完成提示音"功能希望加到桌宠里：通知发生时不仅响系统提示，还能播自定义音色，且可在设置里试听。
+
+> 不要"仅在 IDE 未聚焦时播放"这个过滤——简化掉。
+
+### 设计选择
+
+- **声音文件**：直接复用 jetbrains-cc-gui 的 5 个 `.wav`（MIT 协议，仓库见 `src/main/resources/sounds/`）。下载到 `src/renderer/assets/sounds/`，加 README 标注来源。总 5 个文件约 ~200KB。
+- **播放方式**：Electron 渲染进程的 HTML5 `Audio` 元素，缓存 `Audio` 实例避免反复初始化。
+- **触发面**：沿用原有 `onComplete / onPermission / onError` 三个分类开关；再加一个总开关 `customSound.enabled`。
+- **避免双响**：两扇 Electron 窗口（pet / manager）都会加载 `renderer.js`，但只在 `view === "pet"` 时注册 `onPlaySound` 监听，保证一次通知只响一遍。
+- **预览按钮**：直接在当前 manager 渲染进程里播——不走主进程 IPC——所以即便 pet 窗口被隐藏也能试听。
+
+### 改动一览
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/shared/config.js` | `notifications` 默认值新增 `customSound: { enabled: true, preset: "ding", volume: 0.6 }` |
+| `src/main/main.js` | 新增 `playNotificationSound(category)`；`maybeNotify` 末尾调用一次，通过 `petWindow.webContents.send("claudepet:play-sound", payload)` 发给渲染进程 |
+| `src/preload.js` | 暴露 `onPlaySound(callback)` |
+| `src/renderer/renderer.js` | `SOUND_PRESETS` 常量、`playPresetSound(preset, volume)`、`renderSoundSection(config)` 区块、`data-config-string` 表单绑定、预览按钮事件、IPC 监听（仅 pet 视图） |
+| `src/renderer/styles.css` | `.sound-picker` / `.sound-preview` 布局 |
+| `src/renderer/assets/sounds/` | 5 个 wav + `README.md`（标 MIT + 来源） |
+
+### 配置 schema
+
+```json
+{
+  "notifications": {
+    "system": true,
+    "sound": false,
+    "flashWindow": true,
+    "onComplete": true,
+    "onPermission": true,
+    "onError": true,
+    "customSound": {
+      "enabled": true,
+      "preset": "ding",
+      "volume": 0.6
+    }
+  }
+}
+```
+
+- `enabled`：自定义提示音总开关，关闭后无论哪类事件都不响 wav。
+- `preset`：5 个预设之一：`ding` / `bell` / `chime` / `success` / `task-complete`。
+- `volume`：0~1。
+
+### 主进程播放路径
+
+```js
+function maybeNotify(status) {
+  // ... 既有逻辑 ...
+  playNotificationSound(category);   // <-- 新增
+}
+
+function playNotificationSound(category) {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const settings = (config.notifications && config.notifications.customSound) || {};
+  if (!settings.enabled) return;
+  petWindow.webContents.send("claudepet:play-sound", {
+    preset: settings.preset || "ding",
+    volume: typeof settings.volume === "number" ? settings.volume : 0.6,
+    category
+  });
+}
+```
+
+> 注意：`notif.system === false` 时连系统通知都没有，IPC 之前就已 return；`notif[category] === false`（onComplete/onPermission/onError 单类关闭）同理。也就是说自定义提示音会**继承**整套系统通知开关的过滤行为，**只在它们都通过时**才会响。
+
+### 渲染进程播放路径
+
+```js
+const soundCache = new Map();
+let activeSoundEl = null;
+
+function getSoundEl(preset) {
+  const found = SOUND_PRESETS.find((entry) => entry.id === preset) || SOUND_PRESETS[0];
+  let el = soundCache.get(found.id);
+  if (!el) {
+    el = new Audio(found.file);
+    el.preload = "auto";
+    soundCache.set(found.id, el);
+  }
+  return el;
+}
+
+function playPresetSound(preset, volume) {
+  const el = getSoundEl(preset);
+  if (activeSoundEl && activeSoundEl !== el) {
+    try { activeSoundEl.pause(); activeSoundEl.currentTime = 0; } catch (_) { /* ignore */ }
+  }
+  el.volume = Math.max(0, Math.min(1, Number(volume ?? 0.6)));
+  el.currentTime = 0;
+  activeSoundEl = el;
+  el.play()?.catch?.(() => { /* autoplay blocked */ });
+}
+```
+
+要点：
+- 第一次播过的 `<audio>` 缓存到 `soundCache`，连点不爆。
+- 切换预设时停掉上一条，避免叠音。
+- `play()` 的 Promise 兜底 catch，防止极端情况下浏览器策略拒绝播放抛错。
+
+### UI（显示设置 tab 新区块）
+
+`renderSoundSection(config)` 渲染：
+
+- 一个 toggle：「启用自定义提示音」
+- 一行 picker：select 下拉（5 预设）+ 预览 ▶ 按钮
+- 一个 range：音量 0~100%
+
+绑定走 `data-config-string` / `data-config-bool` / `data-config-number`，统一 `setDeep(patch, key, value)` + `updateConfig(patch)`。
+
+预览按钮：
+
+```js
+$("[data-action='preview-sound']")?.addEventListener("click", () => {
+  const sound = (model.config && model.config.notifications && model.config.notifications.customSound) || {};
+  playPresetSound(sound.preset || "ding", typeof sound.volume === "number" ? sound.volume : 0.6);
+});
+```
+
+### 验证
+
+1. 重启桌宠（托盘→退出，再 `claudepet start`）。
+2. 打开设置中心 → 「显示设置」→ 「提示音」区块。
+3. 切换预设 + 点 ▶，应当试听到对应音色。
+4. 点既有的「测试：完成通知」/「测试：权限通知」/「测试：出错通知」按钮，应当同时收到系统通知 + 自定义 wav 响一声。
+5. 把「启用自定义提示音」关掉再试，wav 不响，系统通知照常。
+6. 把「启用系统通知」关掉再试，两者都不响（自定义提示音继承总开关）。
+
+### 与原 jetbrains-cc-gui 的差异
+
+- 不包含「仅在 IDE 未聚焦时播放」——按用户要求精简。
+- 不分事件配单独音色——所有触发的事件共享同一个 preset；如果将来想分类配音，可把 schema 改成 `customSound: { onComplete: "success", onPermission: "chime", onError: "alert" }` 并在 `playNotificationSound` 里用 `category` 取对应 preset。
+- 用 HTML5 `Audio` 而非 Web Audio API：实现简单、文件 wav 即用，但生成式音色得回到 Web Audio。

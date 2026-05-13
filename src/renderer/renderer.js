@@ -45,6 +45,44 @@ function setManifestSaveFlash(text, tone) {
   }
 }
 
+const SOUND_PRESETS = [
+  { id: "ding", label: "叮咚", file: "./assets/sounds/ding.wav" },
+  { id: "bell", label: "铃声", file: "./assets/sounds/bell.wav" },
+  { id: "chime", label: "提示", file: "./assets/sounds/chime.wav" },
+  { id: "success", label: "成功", file: "./assets/sounds/success.wav" },
+  { id: "task-complete", label: "任务完成", file: "./assets/sounds/task-complete.wav" }
+];
+
+const soundCache = new Map();
+let activeSoundEl = null;
+
+function getSoundEl(preset) {
+  const found = SOUND_PRESETS.find((entry) => entry.id === preset) || SOUND_PRESETS[0];
+  let el = soundCache.get(found.id);
+  if (!el) {
+    el = new Audio(found.file);
+    el.preload = "auto";
+    soundCache.set(found.id, el);
+  }
+  return el;
+}
+
+function playPresetSound(preset, volume) {
+  try {
+    const el = getSoundEl(preset);
+    if (activeSoundEl && activeSoundEl !== el) {
+      try { activeSoundEl.pause(); activeSoundEl.currentTime = 0; } catch (_) { /* ignore */ }
+    }
+    el.volume = Math.max(0, Math.min(1, Number(volume ?? 0.6)));
+    el.currentTime = 0;
+    activeSoundEl = el;
+    const promise = el.play();
+    if (promise && typeof promise.catch === "function") promise.catch(() => { /* autoplay blocked */ });
+  } catch (_) {
+    // ignore audio errors
+  }
+}
+
 const ICONS = {
   pet: '<path d="M7.5 8.5c.9 0 1.6-.9 1.6-2s-.7-2-1.6-2-1.6.9-1.6 2 .7 2 1.6 2Z"/><path d="M16.5 8.5c.9 0 1.6-.9 1.6-2s-.7-2-1.6-2-1.6.9-1.6 2 .7 2 1.6 2Z"/><path d="M8.4 14.1c1-1.1 1.6-2.1 3.6-2.1s2.6 1 3.6 2.1c1.2 1.3 2.1 2.2 1.4 3.6-.7 1.3-2.6.8-5 .8s-4.3.5-5-.8c-.7-1.4.2-2.3 1.4-3.6Z"/>',
   palette: '<path d="M12 3a9 9 0 0 0 0 18h1.3a1.9 1.9 0 0 0 1.3-3.2 1.7 1.7 0 0 1 1.1-2.9H17a4 4 0 0 0 4-4c0-4.4-4-7.9-9-7.9Z"/><circle cx="7.7" cy="10.4" r=".8"/><circle cx="10.4" cy="7.6" r=".8"/><circle cx="14" cy="7.6" r=".8"/><circle cx="16.5" cy="10.4" r=".8"/>',
@@ -784,6 +822,41 @@ function renderFieldToggle(key, checked) {
   return `<label class="toggle with-toggle-icon">${icon(meta.icon)}<input type="checkbox" ${checked ? "checked" : ""} data-field="${escapeHtml(key)}"> <span>${escapeHtml(meta.label)}</span></label>`;
 }
 
+function renderSoundSection(config) {
+  const sound = (config.notifications && config.notifications.customSound) || {};
+  const enabled = sound.enabled !== false;
+  const currentPreset = sound.preset || "ding";
+  const volume = typeof sound.volume === "number" ? sound.volume : 0.6;
+  const options = SOUND_PRESETS.map((preset) =>
+    `<option value="${escapeHtml(preset.id)}" ${preset.id === currentPreset ? "selected" : ""}>${escapeHtml(preset.label)}</option>`
+  ).join("");
+  return `
+    <section class="section">
+      ${sectionTitle("spark", "提示音")}
+      <p class="section-hint">完成 / 权限 / 错误事件触发时播放，由上面的"完成通知/权限通知/出错通知"开关分别控制是否真的响。</p>
+      <div class="form-grid">
+        <label class="toggle with-toggle-icon">
+          ${icon("spark")}<input type="checkbox" ${enabled ? "checked" : ""} data-config-bool="notifications.customSound.enabled">
+          <span>启用自定义提示音</span>
+        </label>
+        <div class="field">
+          <label>${icon("bell", "音色")}</label>
+          <div class="sound-picker">
+            <select data-config-string="notifications.customSound.preset">${options}</select>
+            <button type="button" class="sound-preview" data-action="preview-sound" title="试听">${icon("play")}</button>
+          </div>
+          <span class="field-hint">5 个内置音色，文件位于 <code>src/renderer/assets/sounds/</code></span>
+        </div>
+        <div class="field range-field">
+          <label>${icon("ruler", "音量")}</label>
+          <input type="range" min="0" max="1" step="0.05" value="${volume}" data-config-number="notifications.customSound.volume">
+          <span class="field-hint">当前 ${Math.round(volume * 100)}%</span>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderAppearanceTab(config) {
   return `
     <section class="section">
@@ -823,6 +896,8 @@ function renderAppearanceTab(config) {
         <button data-action="reset-status">${icon("refresh", "重置当前显示")}</button>
       </div>
     </section>
+
+    ${renderSoundSection(config)}
 
     <section class="section">
       ${sectionTitle("fields", "气泡详情字段")}
@@ -930,6 +1005,17 @@ function attachManagerEvents() {
       setDeep(patch, input.dataset.configBool, input.checked);
       Object.assign(model, await window.claudepet.updateConfig(patch));
     });
+  });
+  document.querySelectorAll("[data-config-string]").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const patch = {};
+      setDeep(patch, input.dataset.configString, String(input.value));
+      Object.assign(model, await window.claudepet.updateConfig(patch));
+    });
+  });
+  $("[data-action='preview-sound']")?.addEventListener("click", () => {
+    const sound = (model.config && model.config.notifications && model.config.notifications.customSound) || {};
+    playPresetSound(sound.preset || "ding", typeof sound.volume === "number" ? sound.volume : 0.6);
   });
   const wireNotifAction = (selector, fn) => {
     document.querySelector(selector)?.addEventListener("click", fn);
@@ -1039,6 +1125,7 @@ const FOCUS_DATA_KEYS = [
   "anim",
   "configNumber",
   "configBool",
+  "configString",
   "field",
   "managerTab",
   "petId"
@@ -1256,6 +1343,12 @@ async function init() {
     Object.assign(model, payload);
     render();
   });
+  if (view === "pet" && typeof window.claudepet.onPlaySound === "function") {
+    window.claudepet.onPlaySound((payload) => {
+      if (!payload) return;
+      playPresetSound(payload.preset, payload.volume);
+    });
+  }
   function tick(now) {
     drawCurrentFrame(now);
     requestAnimationFrame(tick);
