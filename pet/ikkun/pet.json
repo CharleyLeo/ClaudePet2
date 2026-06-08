@@ -1,7 +1,7 @@
 {
   "id": "ikkun",
   "displayName": "IKun",
-  "description": "A compact Codex pet based on official Claude Code pixel Clawd frames, extracted without stretching.",
+  "description": "练习两年半的练习生, 喜欢唱🎤/跳🕺/RAP🎵/篮球🏀 !",
   "spritesheetPath": "spritesheet.webp",
   "kind": "character",
   "frameWidth": 192,

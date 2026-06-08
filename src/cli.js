@@ -7,6 +7,7 @@ const { buildStatusLineState, formatFallbackStatusLine, statusFromHook } = requi
 const { saveRuntimeState, loadRuntimeState, appendHistory } = require("./shared/runtime-state");
 const { sendEventWithLaunch, resolveElectronBinary, readRuntime, launchApp } = require("./shared/bridge-client");
 const { appHome, claudeHome, configPath, runtimePath, statePath } = require("./shared/paths");
+const { clearPaused } = require("./shared/launch-flag");
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -197,6 +198,8 @@ async function main(argv = process.argv.slice(2)) {
       return;
     }
     case "start": {
+      // 手动启动 → 清除"暂停自动启动"标记，恢复后续 hook 事件的自动拉起能力。
+      clearPaused();
       if (!launchApp()) {
         process.stderr.write("Electron is not installed. Run npm install first.\n");
         process.exitCode = 1;

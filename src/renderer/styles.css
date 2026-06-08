@@ -14,6 +14,12 @@
   --green: #9bd67a;
   --red: #ff6b6b;
   --violet: #b9a7ff;
+
+  /* 桌宠舞台几何（修改这些值就能整体调整 HP / badge 与宠物的相对位置） */
+  --stage-padding-bottom: 12px;     /* 与 .pet-stage padding 保持一致 */
+  --hp-pet-gap: 13px;               /* HP 条底 ↔ 宠物顶 的间距 */
+  --hp-block-height: 26px;          /* HP 块自身高度（含 padding+border，校准值） */
+  --hp-badge-gap: 26px;             /* HP 顶 ↔ badge 底 的间距 */
 }
 
 * {
@@ -122,40 +128,40 @@ button:hover {
   position: absolute;
   z-index: 5;
   top: auto;
-  bottom: calc(25px + var(--pet-render-height, 100px));
+  bottom: calc(var(--stage-padding-bottom) + var(--hp-pet-gap) + var(--pet-render-height, 100px));
   left: 50%;
-  width: 116px;
+  width: 104px;
   transform: translateX(-50%);
-  padding: 4px 5px 5px;
-  border-radius: 7px;
+  padding: 3px 4px 3px;
+  border-radius: 6px;
   background: rgba(17, 19, 24, 0.86);
   border: 1px solid rgba(255, 255, 255, 0.18);
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.26);
+  box-shadow: 0 7px 16px rgba(0, 0, 0, 0.26);
 }
 
 .hp-head {
   display: grid;
   grid-template-columns: auto auto 1fr;
-  gap: 4px;
+  gap: 3px;
   align-items: center;
-  margin-bottom: 3px;
+  margin-bottom: 2px;
 }
 
 .hp-head span {
   color: var(--green);
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 900;
 }
 
 .hp-head strong {
   color: var(--text);
-  font-size: 9px;
+  font-size: 8px;
 }
 
 .hp-head b {
   min-width: 0;
-  color: var(--muted);
-  font-size: 8px;
+  color: var(--violet);
+  font-size: 7px;
   text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -164,7 +170,7 @@ button:hover {
 
 .hp-bar {
   position: relative;
-  height: 7px;
+  height: 6px;
   overflow: hidden;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.14);
@@ -267,11 +273,12 @@ button:hover {
 }
 
 .complete-burst,
-.attention-badge {
+.attention-badge,
+.error-badge {
   position: absolute;
   z-index: 4;
-  top: 20px;
-  right: 10px;
+  bottom: calc(var(--stage-padding-bottom) + var(--hp-pet-gap) + var(--hp-block-height) + var(--hp-badge-gap) + var(--pet-render-height, 100px));
+  left: 50%;
   display: grid;
   place-items: center;
   min-width: 42px;
@@ -284,7 +291,7 @@ button:hover {
   box-shadow: 0 0 20px rgba(155, 214, 122, 0.72);
   font-size: 11px;
   font-weight: 900;
-  transform: rotate(-8deg);
+  transform: translateX(-50%) rotate(-8deg);
 }
 
 .attention-badge {
@@ -293,6 +300,12 @@ button:hover {
   background: var(--amber);
   box-shadow: 0 0 20px rgba(241, 200, 107, 0.72);
   font-size: 18px;
+}
+
+.error-badge {
+  color: #fff;
+  background: var(--red);
+  box-shadow: 0 0 20px rgba(255, 107, 107, 0.72);
 }
 
 .speech {
@@ -925,6 +938,135 @@ button:hover {
 .field input:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* ───── 自定义 range slider ───── */
+.range-field {
+  --range-track-fill: linear-gradient(90deg, var(--mint), var(--cyan));
+  --range-track-rest: rgba(255, 255, 255, 0.10);
+  --range-thumb-glow: rgba(139, 214, 255, 0.45);
+}
+
+.range-field input[type="range"] {
+  --value: 0%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+  border-radius: 0;
+}
+
+.range-field input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  /* 单层渐变 + 硬色停，每次 --value 变化只触发 1 次背景重绘 */
+  background: linear-gradient(
+    90deg,
+    var(--mint) 0%,
+    var(--cyan) var(--value),
+    var(--range-track-rest) var(--value),
+    var(--range-track-rest) 100%
+  );
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.32);
+}
+
+.range-field input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--range-track-rest);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.32);
+  border: none;
+}
+
+.range-field input[type="range"]::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--range-track-fill);
+}
+
+.range-field input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.55) 22%, transparent 60%),
+    linear-gradient(160deg, var(--cyan), var(--mint));
+  border: 2px solid var(--panel-solid);
+  box-shadow:
+    0 0 0 1px var(--range-thumb-glow),
+    0 4px 10px var(--range-thumb-glow),
+    0 2px 4px rgba(0, 0, 0, 0.42);
+  transition: transform 120ms ease, box-shadow 160ms ease;
+  cursor: grab;
+}
+
+.range-field input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.55) 22%, transparent 60%),
+    linear-gradient(160deg, var(--cyan), var(--mint));
+  border: 2px solid var(--panel-solid);
+  box-shadow:
+    0 0 0 1px var(--range-thumb-glow),
+    0 4px 10px var(--range-thumb-glow),
+    0 2px 4px rgba(0, 0, 0, 0.42);
+  transition: transform 120ms ease, box-shadow 160ms ease;
+  cursor: grab;
+}
+
+.range-field input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.16);
+  box-shadow:
+    0 0 0 2px rgba(139, 214, 255, 0.55),
+    0 6px 14px rgba(139, 214, 255, 0.6),
+    0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.range-field input[type="range"]:hover::-moz-range-thumb {
+  transform: scale(1.16);
+  box-shadow:
+    0 0 0 2px rgba(139, 214, 255, 0.55),
+    0 6px 14px rgba(139, 214, 255, 0.6),
+    0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.range-field input[type="range"]:active {
+  cursor: grabbing;
+}
+
+.range-field input[type="range"]:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.08);
+}
+
+.range-field input[type="range"]:active::-moz-range-thumb {
+  cursor: grabbing;
+  transform: scale(1.08);
+}
+
+.range-field input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px rgba(155, 214, 122, 0.45),
+    0 4px 10px var(--range-thumb-glow),
+    0 2px 4px rgba(0, 0, 0, 0.42);
+}
+
+.range-field input[type="range"]:focus-visible::-moz-range-thumb {
+  box-shadow:
+    0 0 0 3px rgba(155, 214, 122, 0.45),
+    0 4px 10px var(--range-thumb-glow),
+    0 2px 4px rgba(0, 0, 0, 0.42);
 }
 
 .field-hint {

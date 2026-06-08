@@ -11,6 +11,7 @@ const DEFAULT_CONFIG = {
   showPanel: true,
   panelCompact: false,
   runOnDrag: true,
+  petVisible: true,
   position: null,
   notifications: {
     system: true,

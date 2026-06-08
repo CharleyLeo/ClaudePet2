@@ -29,6 +29,10 @@ function usagePath() {
   return path.join(appHome(), "usage.json");
 }
 
+function pausedFlagPath() {
+  return path.join(appHome(), "paused.flag");
+}
+
 function cliScript() {
   return path.join(appRoot(), "bin", "claudepet.js");
 }
@@ -53,6 +57,7 @@ module.exports = {
   configPath,
   statePath,
   usagePath,
+  pausedFlagPath,
   cliScript,
   quoteCommandArg,
   buildNodeCommand

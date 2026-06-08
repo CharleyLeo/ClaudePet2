@@ -17,7 +17,9 @@
     "install:local": "node bin/claudepet.js install --scope local --preserve-statusline",
     "install:user": "node bin/claudepet.js install --scope user --preserve-statusline",
     "uninstall:local": "node bin/claudepet.js uninstall --scope local",
-    "uninstall:user": "node bin/claudepet.js uninstall --scope user"
+    "uninstall:user": "node bin/claudepet.js uninstall --scope user",
+    "sounds:normalize": "node scripts/normalize-sounds.js",
+    "sounds:restore": "node scripts/normalize-sounds.js --restore"
   },
   "keywords": [
     "claude-code",

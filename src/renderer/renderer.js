@@ -45,42 +45,88 @@ function setManifestSaveFlash(text, tone) {
   }
 }
 
-const SOUND_PRESETS = [
-  { id: "ding", label: "叮咚", file: "./assets/sounds/ding.wav" },
-  { id: "bell", label: "铃声", file: "./assets/sounds/bell.wav" },
-  { id: "chime", label: "提示", file: "./assets/sounds/chime.wav" },
-  { id: "success", label: "成功", file: "./assets/sounds/success.wav" },
-  { id: "task-complete", label: "任务完成", file: "./assets/sounds/task-complete.wav" }
-];
+const SOUND_FALLBACK = [{ id: "ding", label: "叮咚", file: "./assets/sounds/ding.wav" }];
+let SOUND_PRESETS = SOUND_FALLBACK;
 
-const soundCache = new Map();
-let activeSoundEl = null;
-
-function getSoundEl(preset) {
-  const found = SOUND_PRESETS.find((entry) => entry.id === preset) || SOUND_PRESETS[0];
-  let el = soundCache.get(found.id);
-  if (!el) {
-    el = new Audio(found.file);
-    el.preload = "auto";
-    soundCache.set(found.id, el);
+async function loadSoundPresets() {
+  try {
+    const res = await fetch("./assets/sounds/manifest.json");
+    if (!res.ok) throw new Error(`manifest http ${res.status}`);
+    const list = await res.json();
+    if (!Array.isArray(list) || list.length === 0) throw new Error("manifest empty");
+    SOUND_PRESETS = list.map((entry) => ({
+      id: String(entry.id),
+      label: String(entry.label || entry.id),
+      file: `./assets/sounds/${entry.file}`
+    }));
+  } catch (_) {
+    SOUND_PRESETS = SOUND_FALLBACK;
   }
-  return el;
+}
+
+let audioContext = null;
+const bufferCache = new Map();
+const bufferPending = new Map();
+let activeSoundSource = null;
+
+function ensureAudioContext() {
+  if (!audioContext) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audioContext = new Ctx();
+  }
+  if (audioContext.state === "suspended") {
+    audioContext.resume().catch(() => { /* user gesture required */ });
+  }
+  return audioContext;
+}
+
+async function loadBuffer(preset) {
+  const found = SOUND_PRESETS.find((entry) => entry.id === preset) || SOUND_PRESETS[0];
+  if (bufferCache.has(found.id)) return bufferCache.get(found.id);
+  if (bufferPending.has(found.id)) return bufferPending.get(found.id);
+  const ctx = ensureAudioContext();
+  if (!ctx) return null;
+  const promise = fetch(found.file)
+    .then((res) => res.arrayBuffer())
+    .then((buf) => ctx.decodeAudioData(buf))
+    .then((decoded) => {
+      bufferCache.set(found.id, decoded);
+      bufferPending.delete(found.id);
+      return decoded;
+    })
+    .catch((error) => {
+      bufferPending.delete(found.id);
+      throw error;
+    });
+  bufferPending.set(found.id, promise);
+  return promise;
 }
 
 function playPresetSound(preset, volume) {
-  try {
-    const el = getSoundEl(preset);
-    if (activeSoundEl && activeSoundEl !== el) {
-      try { activeSoundEl.pause(); activeSoundEl.currentTime = 0; } catch (_) { /* ignore */ }
-    }
-    el.volume = Math.max(0, Math.min(1, Number(volume ?? 0.6)));
-    el.currentTime = 0;
-    activeSoundEl = el;
-    const promise = el.play();
-    if (promise && typeof promise.catch === "function") promise.catch(() => { /* autoplay blocked */ });
-  } catch (_) {
-    // ignore audio errors
-  }
+  const ctx = ensureAudioContext();
+  if (!ctx) return;
+  const gainValue = Math.max(0, Math.min(3, Number(volume ?? 0.6)));
+  loadBuffer(preset)
+    .then((buffer) => {
+      if (!buffer) return;
+      try {
+        if (activeSoundSource) {
+          try { activeSoundSource.stop(); } catch (_) { /* already stopped */ }
+        }
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        const gain = ctx.createGain();
+        gain.gain.value = gainValue;
+        source.connect(gain).connect(ctx.destination);
+        source.onended = () => {
+          if (activeSoundSource === source) activeSoundSource = null;
+        };
+        activeSoundSource = source;
+        source.start(0);
+      } catch (_) { /* ignore audio errors */ }
+    })
+    .catch(() => { /* fetch / decode failed */ });
 }
 
 const ICONS = {
@@ -399,6 +445,7 @@ function renderPetView() {
           <div class="pet-shadow"></div>
           ${phase === "phase-done" ? '<div class="complete-burst">DONE</div>' : ""}
           ${phase === "phase-waiting" ? '<div class="attention-badge">!</div>' : ""}
+          ${phase === "phase-error" ? '<div class="error-badge">ERR</div>' : ""}
         </div>
         <div class="speech ${status.attention ? "attention" : ""}" ${model.ui.expanded ? "data-clickable" : ""} ${config.showPanel ? "" : 'style="display:none"'}>
           <button class="speech-toggle" data-clickable data-action="toggle-details" title="${model.ui.expanded ? "收起" : "展开"}">${model.ui.expanded ? "▴" : "▾"}</button>
@@ -849,8 +896,8 @@ function renderSoundSection(config) {
         </div>
         <div class="field range-field">
           <label>${icon("ruler", "音量")}</label>
-          <input type="range" min="0" max="1" step="0.05" value="${volume}" data-config-number="notifications.customSound.volume">
-          <span class="field-hint">当前 ${Math.round(volume * 100)}%</span>
+          <input type="range" min="0" max="2" step="0.05" value="${volume}" data-config-number="notifications.customSound.volume">
+          <span class="field-hint">当前 ${Math.round(volume * 100)}%（&gt;100% 通过 GainNode 软件放大，超过 150% 可能轻微失真）</span>
         </div>
       </div>
     </section>
@@ -872,6 +919,7 @@ function renderAppearanceTab(config) {
           <input type="range" min="0.35" max="1" step="0.01" value="${config.opacity}" data-config-number="opacity">
           <span class="field-hint">当前 ${Math.round(Number(config.opacity) * 100)}%</span>
         </div>
+        <label class="toggle with-toggle-icon">${icon("power")}<input type="checkbox" ${config.petVisible !== false ? "checked" : ""} data-config-bool="petVisible"> <span>显示桌宠（关闭即隐藏窗口）</span></label>
         <label class="toggle with-toggle-icon">${icon("pin")}<input type="checkbox" ${config.alwaysOnTop ? "checked" : ""} data-config-bool="alwaysOnTop"> <span>总在最前</span></label>
         <label class="toggle with-toggle-icon">${icon("play")}<input type="checkbox" ${config.runOnDrag ? "checked" : ""} data-config-bool="runOnDrag"> <span>拖动时播放奔跑动画</span></label>
         <label class="toggle with-toggle-icon">${icon("panel")}<input type="checkbox" ${config.showPanel ? "checked" : ""} data-config-bool="showPanel"> <span>显示气泡面板</span></label>
@@ -970,6 +1018,20 @@ function attachUsageEvents() {
   });
 }
 
+function updateRangeFill(input) {
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const val = Number(input.value);
+  const span = max - min;
+  const trackPct = span > 0 ? Math.max(0, Math.min(100, ((val - min) / span) * 100)) : 0;
+  input.style.setProperty("--value", `${trackPct.toFixed(2)}%`);
+  const wrapper = input.closest(".range-field");
+  const hint = wrapper && wrapper.querySelector(".field-hint");
+  if (hint) {
+    hint.textContent = hint.textContent.replace(/当前\s*-?\d+%/, `当前 ${Math.round(val * 100)}%`);
+  }
+}
+
 function setDeep(object, path, value) {
   const parts = path.split(".");
   let current = object;
@@ -992,12 +1054,36 @@ function attachManagerEvents() {
     });
   });
   document.querySelectorAll("[data-config-number]").forEach((input) => {
-    input.addEventListener("input", async () => {
-      const patch = {};
-      setDeep(patch, input.dataset.configNumber, Number(input.value));
-      Object.assign(model, await window.claudepet.updateConfig(patch));
-      drawCurrentFrame();
-    });
+    if (input.type === "range") {
+      updateRangeFill(input);
+      // 拖动期间：只更新本地（不走 IPC，避免主进程 broadcast 回来 render() 把
+      // thumb DOM 重建掉，断掉浏览器内部的 pointer 抓取，导致"只能点不能拖"）。
+      // rAF 节流：input 事件 200Hz，浏览器渲染 60Hz，多余的回调浪费。
+      let pendingRaf = 0;
+      input.addEventListener("input", () => {
+        if (pendingRaf) return;
+        pendingRaf = requestAnimationFrame(() => {
+          pendingRaf = 0;
+          updateRangeFill(input);
+          setDeep(model.config, input.dataset.configNumber, Number(input.value));
+          // 不在这里调 drawCurrentFrame —— init() 里的 tick(rAF) 死循环每帧已在
+          // 跑 drawCurrentFrame，input handler 再调一次纯属冗余 + 阻塞主线程。
+        });
+      });
+      // 释放（或键盘回车）时才落盘 + 通知主进程，触发完整 broadcast。
+      input.addEventListener("change", async () => {
+        const patch = {};
+        setDeep(patch, input.dataset.configNumber, Number(input.value));
+        Object.assign(model, await window.claudepet.updateConfig(patch));
+      });
+    } else {
+      input.addEventListener("input", async () => {
+        const patch = {};
+        setDeep(patch, input.dataset.configNumber, Number(input.value));
+        Object.assign(model, await window.claudepet.updateConfig(patch));
+        drawCurrentFrame();
+      });
+    }
   });
   document.querySelectorAll("[data-config-bool]").forEach((input) => {
     input.addEventListener("change", async () => {
@@ -1334,7 +1420,8 @@ function installDragHandlers() {
 }
 
 async function init() {
-  Object.assign(model, await window.claudepet.getInitial());
+  const [initial] = await Promise.all([window.claudepet.getInitial(), loadSoundPresets()]);
+  Object.assign(model, initial);
   model.selectedManagerPet = model.config.selectedPet;
   installDragHandlers();
   render();

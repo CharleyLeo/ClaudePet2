@@ -12,7 +12,9 @@
 - 五、整体验证清单
 - 六、项目重命名（ClaudePet → ClaudePet2）：迁移与 install bug 修复
 - 七、Windows 上 legacy statusLine 兼容（Git Bash 检测）
-- 八、自定义通知提示音
+- 八、自定义通知提示音（含 Web Audio 改造 + wav 峰值归一化脚本）
+- 九、批量优化（CSS 变量、sound manifest、滑条美化、Manager 懒加载、cwd 切换 reset）
+- 十、开关桌宠 + 关闭即真退出（paused 标记，命令行手动重启）
 
 ---
 
@@ -739,4 +741,487 @@ $("[data-action='preview-sound']")?.addEventListener("click", () => {
 
 - 不包含「仅在 IDE 未聚焦时播放」——按用户要求精简。
 - 不分事件配单独音色——所有触发的事件共享同一个 preset；如果将来想分类配音，可把 schema 改成 `customSound: { onComplete: "success", onPermission: "chime", onError: "alert" }` 并在 `playNotificationSound` 里用 `category` 取对应 preset。
-- 用 HTML5 `Audio` 而非 Web Audio API：实现简单、文件 wav 即用，但生成式音色得回到 Web Audio。
+
+### 后续：响度问题与两段优化
+
+第一版上线后用户反馈"100% 音量还是太轻"。诊断 + 修复分两步：
+
+#### 1) 实现层：HTML5 `Audio` → Web Audio API
+
+`<audio>` 元素的 `volume` 硬性 clamp 在 0~1，没法软件放大。改用 Web Audio：
+
+```js
+function ensureAudioContext() {
+  if (!audioContext) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    audioContext = new Ctx();
+  }
+  if (audioContext.state === "suspended") audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+async function loadBuffer(preset) { /* fetch + decodeAudioData，结果缓存到 bufferCache Map */ }
+
+function playPresetSound(preset, volume) {
+  const ctx = ensureAudioContext();
+  const gainValue = Math.max(0, Math.min(3, Number(volume ?? 0.6)));
+  loadBuffer(preset).then((buffer) => {
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    const gain = ctx.createGain();
+    gain.gain.value = gainValue;          // 可以 > 1，最大软件放大 3×
+    source.connect(gain).connect(ctx.destination);
+    source.start(0);
+  });
+}
+```
+
+要点：
+- `AudioBuffer` 解码一次后缓存，连点不重复 fetch；
+- `bufferPending` Map 用来去重并发请求（首次 preview 还没解码完时第二次点）；
+- `activeSoundSource.stop()` 处理切预设时的旧音源截断；
+- UI 滑条 `max` 从 1 提到 2（200%）；`playPresetSound` 内 clamp 到 3，给后续手动改 `max=3` 留余地；
+- field-hint 文字加上"超过 150% 可能轻微失真"提示。
+
+> Autoplay 策略：浏览器要求 AudioContext 在用户手势之后才能 resume。Electron 渲染进程同样遵守。预览按钮算手势，所以预览过一次后通知触发也能稳定播放。
+
+#### 2) 内容层：原始 wav 太轻 → 峰值归一化
+
+继续诊断发现 5 个 wav 的**原始峰值只到 -10 ~ -12 dBFS**（用了 int16 范围的 ~25-30%），怪不得放大也吃力。新增 `scripts/normalize-sounds.js`：
+
+```bash
+node scripts/normalize-sounds.js              # 默认目标 -0.5 dBFS
+node scripts/normalize-sounds.js --target=-1  # 更保守
+node scripts/normalize-sounds.js --restore    # 还原
+```
+
+或通过 npm scripts：
+
+```bash
+npm run sounds:normalize
+npm run sounds:restore
+```
+
+实现细节：
+- 不依赖 ffmpeg/sox，纯 Node 直接读写 16-bit PCM WAV；
+- 容错解析 RIFF chunk（跳过 LIST/JUNK 等非 fmt/data 块）；
+- 首次运行把原版备份到 `assets/sounds/original/`，后续每次都从备份重算 → 幂等，可反复调 target；
+- 只支持 `audioFormat=1`（PCM）和 `bitsPerSample=16`，遇到其它格式会报错跳过当前文件。
+
+归一化结果：
+
+| 文件 | 原峰值 | 放大倍数 | 新峰值 |
+| --- | --- | --- | --- |
+| bell.wav | -12.38 dBFS | ×3.93 | -0.5 dBFS |
+| ding.wav | -12.04 dBFS | ×3.78 | -0.5 dBFS |
+| chime.wav | -10.46 dBFS | ×3.15 | -0.5 dBFS |
+| success.wav | -10.46 dBFS | ×3.15 | -0.5 dBFS |
+| task-complete.wav | -10.46 dBFS | ×3.15 | -0.5 dBFS |
+
+#### 综合效果
+
+| 阶段 | 100% 滑条响度 | 滑到顶 | 失真 |
+| --- | --- | --- | --- |
+| 第一版（HTML5 Audio + 原始 wav） | 1.0× 原版 | 1.0×（卡死在 100%） | 无 |
+| 第二版（Web Audio + GainNode） | 1.0× 原版 | 2.0× | 150%+ 略明显 |
+| **当前（归一化后 + Web Audio）** | **≈ 3.5× 原版** | **≈ 7× 原版** | 软件放大段同上，归一化段无失真 |
+
+通常 100% 已经够用，不需要再开 GainNode 软件放大，也就回避了失真。要进一步提升只需在脚本里把 `--target` 调到接近 0（比如 `0 dBFS` = 几乎贴满），不过没必要。
+
+#### 还原路径
+
+如果哪天觉得现在太响、或者想换一组源文件：
+
+1. `npm run sounds:restore` 回到原版 wav；
+2. 若想完全去掉 Web Audio 改造，回退 `src/renderer/renderer.js` 里 `playPresetSound` 那段到 git 历史里的 HTML5 `Audio` 版本即可，preload / main / config schema 都不需要动。
+
+---
+
+## 九、批量优化：CSS 变量、sound manifest、滑条美化、Manager 懒加载、cwd 切换 reset
+
+> 集中处理一批"性价比高但散在各处"的小优化，一次提交完成。
+
+### 9.1 HP / badge 几何参数 → CSS 变量
+
+之前为微调 HP 条与 badge 的相对位置改了 N 次魔数（25 / 71 / 77 / 99 / 103 …）。每次都要重新口算 `HP-bottom + HP-height + gap` 这种公式，容易错。提成 `:root` 变量：
+
+```css
+:root {
+  --stage-padding-bottom: 12px;     /* 与 .pet-stage padding 保持一致 */
+  --hp-pet-gap: 13px;               /* HP 条底 ↔ 宠物顶 的间距 */
+  --hp-block-height: 26px;          /* HP 块自身高度（含 padding+border，校准值） */
+  --hp-badge-gap: 26px;             /* HP 顶 ↔ badge 底 的间距 */
+}
+```
+
+`.hp` 和 `.complete-burst, .attention-badge, .error-badge` 改用 `calc()` 引用：
+
+```css
+.hp {
+  bottom: calc(var(--stage-padding-bottom) + var(--hp-pet-gap) + var(--pet-render-height, 100px));
+}
+.complete-burst, .attention-badge, .error-badge {
+  bottom: calc(var(--stage-padding-bottom) + var(--hp-pet-gap) + var(--hp-block-height) + var(--hp-badge-gap) + var(--pet-render-height, 100px));
+}
+```
+
+数值兼容性：
+- 旧 `25 = 12 + 13` ✓
+- 旧 `77 = 12 + 13 + 26 + 26` ✓
+
+后续要改"badge 上飘多远"或"HP 与宠物的呼吸距离"，改一行变量即可，不用动公式。
+
+> 注：`--hp-block-height` 是手动校准值。如果以后改 HP 内部 padding/字号导致它的实际渲染高度变了，需要重新量一下并更新这个变量。要做到全自动可以用 JS 测量 `getBoundingClientRect()` 后 `setProperty`，但目前手动维护的成本比"加一段 ResizeObserver"低。
+
+### 9.2 Sound preset → JSON manifest
+
+之前 `SOUND_PRESETS` 数组写死在 `renderer.js`。和 pets 系统对齐，改成数据驱动：
+
+新建 `src/renderer/assets/sounds/manifest.json`：
+
+```json
+[
+  { "id": "ding", "label": "叮咚", "file": "ding.wav" },
+  { "id": "bell", "label": "铃声", "file": "bell.wav" },
+  ...
+]
+```
+
+`renderer.js`：
+
+```js
+const SOUND_FALLBACK = [{ id: "ding", label: "叮咚", file: "./assets/sounds/ding.wav" }];
+let SOUND_PRESETS = SOUND_FALLBACK;
+
+async function loadSoundPresets() {
+  try {
+    const res = await fetch("./assets/sounds/manifest.json");
+    if (!res.ok) throw new Error(`manifest http ${res.status}`);
+    const list = await res.json();
+    if (!Array.isArray(list) || list.length === 0) throw new Error("manifest empty");
+    SOUND_PRESETS = list.map((entry) => ({
+      id: String(entry.id),
+      label: String(entry.label || entry.id),
+      file: `./assets/sounds/${entry.file}`
+    }));
+  } catch (_) {
+    SOUND_PRESETS = SOUND_FALLBACK;
+  }
+}
+```
+
+`init()` 里 `Promise.all([getInitial, loadSoundPresets])` 并发等待，第一次 render 前 `SOUND_PRESETS` 已就绪。
+
+加新音色现在的流程：
+
+1. wav 丢进 `src/renderer/assets/sounds/`
+2. 跑一次 `npm run sounds:normalize`（自动备份原版 + 归一化）
+3. `manifest.json` 加一行 `{ "id": "xxx", "label": "中文名", "file": "xxx.wav" }`
+
+完全不用动 JS。
+
+### 9.3 滑条（range slider）美化
+
+#### 现状
+
+之前所有 `<input type="range">` 用浏览器默认样式，平庸；并且"当前 X%"hint 是渲染时算的静态文本，**拖动滑条不会更新数字**，让人困惑。
+
+#### 设计
+
+- 轨道（track）：6px 高、圆角 999、带内阴影；填充段用 `mint → cyan` 渐变，未填充段是半透明白
+- 拇指（thumb）：18px 圆形，叠加 `radial-gradient` 左上高光 + `linear-gradient` 主体青色，带 cyan 发光阴影
+- 状态：hover 放大 1.16，active 缩到 1.08（按下手感），focus-visible 加绿色 outline
+- WebKit 和 Firefox 双重 vendor prefix（`::-webkit-slider-runnable-track` / `::-moz-range-track` / `::-webkit-slider-thumb` / `::-moz-range-thumb`）
+
+#### 填充进度的 CSS-only 实现
+
+range input 没有原生"已填充段"伪元素（Firefox 有 `::-moz-range-progress`，Chromium 没有）。Chromium 这边用 `--value` CSS 自定义属性 + 双 layer 背景：
+
+```css
+.range-field input[type="range"]::-webkit-slider-runnable-track {
+  background:
+    linear-gradient(90deg, var(--range-track-rest), var(--range-track-rest)),
+    var(--range-track-fill);
+  background-size: calc(100% - var(--value)) 100%, var(--value) 100%;
+  background-position: right center, left center;
+  background-repeat: no-repeat, no-repeat;
+}
+```
+
+JS 同步更新 `--value`：
+
+```js
+function updateRangeFill(input) {
+  const min = Number(input.min);
+  const max = Number(input.max);
+  const val = Number(input.value);
+  const span = max - min;
+  const trackPct = span > 0 ? Math.max(0, Math.min(100, ((val - min) / span) * 100)) : 0;
+  input.style.setProperty("--value", `${trackPct.toFixed(2)}%`);
+  // 顺带把 .field-hint 里"当前 X%"改成实时值（解决之前 hint 不动的 bug）
+  const wrapper = input.closest(".range-field");
+  const hint = wrapper && wrapper.querySelector(".field-hint");
+  if (hint) {
+    hint.textContent = hint.textContent.replace(/当前\s*-?\d+%/, `当前 ${Math.round(val * 100)}%`);
+  }
+}
+```
+
+调用时机：在 `attachManagerEvents` 的 `data-config-number` 输入循环里，初次 render 调一次设置初始 `--value`，input 事件触发时再调一次（input 事件先于 `await updateConfig` 跑，保证 UI 即时反馈）。
+
+#### 影响范围
+
+3 个 range 全部受益：
+
+- 音量（`notifications.customSound.volume`，max=2）
+- 桌宠大小（`scale`，min=0.32 max=1.1）
+- 窗口不透明度（`opacity`，min=0.35 max=1）
+
+注意 trackPct（用于填充长度）和 `Math.round(val * 100)`（用于"当前 X%"hint 文本）是两个不同的算式：scale 在 0.5 时填充 ≈ 23%（落在 0.32~1.1 区间内的位置），但 hint 显示"当前 50%"。这是有意的——填充反映"在可调范围内的位置"，hint 反映"配置项的语义百分比"。
+
+### 9.4 Manager 窗口懒加载
+
+之前 `boot()` 里同时 `createPetWindow()` + `createManagerWindow()`，即便用户从不打开设置，BrowserWindow + preload + renderer 全部加载。Electron 一个空窗口大约 30-50MB。
+
+#### 改动
+
+`boot()` 里去掉 `createManagerWindow()`，让 `showManager()` 自己懒创建。同时 `showManager` 修一下"首次打开闪一下白屏"问题——createWindow 后 loadFile 是异步的，立刻 show 时内容还没渲染完：
+
+```js
+function showManager() {
+  if (!managerWindow) {
+    createManagerWindow();
+    managerWindow.once("ready-to-show", () => {
+      if (!managerWindow || managerWindow.isDestroyed()) return;
+      managerWindow.show();
+      managerWindow.focus();
+    });
+    return;
+  }
+  managerWindow.show();
+  managerWindow.focus();
+}
+```
+
+#### 行为差异
+
+- 启动时少一个 BrowserWindow，启动更快、内存占用更低
+- 第一次"打开设置"会有几百毫秒的加载延迟（loadFile + initial render）
+- 第二次起跟之前一样秒开（窗口仍 hide-on-close 缓存）
+- 关闭策略不变（`close` 事件转成 `hide()`）
+
+如果将来想更激进——关闭就 destroy 不留缓存——把 `close` 处理器里的 `hide()` 改成 `null` + destroy 即可，但每次开都要等 loadFile，体验会变重。
+
+### 9.5 多会话切换：cwd 变化时重置 status
+
+#### 现象
+
+CHANGELOG 第四节描述的老遗留：用户在多个 Claude Code 终端窗口（不同 `cwd`）间 alt-tab，桌宠气泡里**仍显示之前那个项目的最后一次输出**，直到新会话主动 fire 一次 statusline / hook 才覆盖。中间空窗期非常迷惑。
+
+#### 实现：方案 C（hook 内联检测）
+
+`updateStateFromEvent` 入口加一个 cwd 比对，发现 cwd 变了就先把 status 清回 idle，然后再让事件正常 merge：
+
+```js
+function incomingCwd(event) {
+  if (event.type === "statusline") {
+    return event.state && event.state.session && event.state.session.cwd;
+  }
+  if (event.type === "hook") {
+    const raw = event.raw || {};
+    return raw.cwd || (raw.workspace && raw.workspace.current_dir) || null;
+  }
+  return null;
+}
+
+function maybeResetForCwdChange(event) {
+  const newCwd = incomingCwd(event);
+  const oldCwd = state.session && state.session.cwd;
+  if (!newCwd || !oldCwd || newCwd === oldCwd) return;
+  state = {
+    ...state,
+    session: {
+      ...(state.session || {}),
+      cwd: newCwd,
+      cwdName: path.basename(newCwd) || newCwd,
+      id: ""
+    },
+    status: {
+      kind: "idle", label: "Claude Code is ready", detail: "",
+      severity: "info", attention: false, animation: "idle",
+      updatedAt: new Date().toISOString()
+    },
+    activeSubagent: null
+  };
+}
+
+function updateStateFromEvent(event) {
+  maybeResetForCwdChange(event);
+  // ... 原有的 statusline / hook 分支
+}
+```
+
+要点：
+- 仅在 `oldCwd && newCwd && oldCwd !== newCwd` 时触发，避免初次冷启动 oldCwd 为空时也被 reset
+- reset 后立刻把 `session.cwd` 改成新值，下一次同 cwd 的事件就不会再误触发
+- session.id 一并清空（旧 session id 跟旧 cwd 绑定，留着会让 detail row 显示错误的 8 字符摘要）
+
+#### 与方案 A/B 的差异
+
+CHANGELOG 第四节列了三种方案：
+
+- A：按 session.id 分通道存储 + UI 切换器 → 数据结构改动大，UI 也要加
+- B：探测前台进程匹配 cwd → Windows 要 native 调用，跨平台不一致
+- **C（本次实现）：hook 内联检测 cwd** → 简单、跨平台、零额外依赖
+
+C 的代价：切到新 Claude Code 窗口后，必须**触发一次事件**（敲键盘、跑工具、statusline 自然 refresh）才会 reset。最快也要等 ~2 秒（statusline refreshInterval=2s）。但比起原来"永远不更新"已经强很多，且不需要任何架构改动。
+
+如果以后想做到"切焦点立即 reset"，再考虑做 B；目前 C 够用。
+
+---
+
+## 十、开关桌宠 + 关闭即真退出
+
+> 两个关联需求：(1) 在「显示设置」加一个开关随时显示/隐藏桌宠；(2) 点关闭按钮就彻底退出，不要再被 Claude Code 事件自动拉起，重启只走命令行。
+
+### 10.1 关闭即真退出：根因与 paused 标记
+
+#### 根因
+
+Claude Code 每次 hook / statusline 事件都经 `src/shared/bridge-client.js` 的 `sendEventWithLaunch` 投递。投递失败（桌宠没在跑）时，它默认会 `launchApp()` 自动把 Electron 拉起：
+
+```js
+async function sendEventWithLaunch(payload) {
+  if (await sendEvent(payload)) return true;
+  if (process.env.CLAUDEPET_NO_AUTO_LAUNCH === "1") return false;
+  if (!launchApp()) return false;   // ← 这里把刚关掉的桌宠又拉起来了
+  ...
+}
+```
+
+所以"点关闭 → app 退出 → 下一个事件把它又拉起来"，表现为"关不掉、自动重启"。原本有个 `CLAUDEPET_NO_AUTO_LAUNCH` 环境变量能关，但那是临时的、不持久，也不适合给普通用户用。
+
+#### 方案：持久标记文件 `~/.claudepet/paused.flag`
+
+新增 `src/shared/launch-flag.js`：
+
+```js
+const { pausedFlagPath } = require("./paths");
+
+function isPaused()  { try { return fs.existsSync(pausedFlagPath()); } catch { return false; } }
+function setPaused() { /* mkdir -p + writeFile 时间戳 */ }
+function clearPaused() { /* rmSync force */ }
+```
+
+`paths.js` 加 `pausedFlagPath() → appHome()/paused.flag`。
+
+各处接线：
+
+| 时机 | 行为 | 位置 |
+| --- | --- | --- |
+| 用户主动退出（关闭按钮 / 托盘退出 / 菜单退出） | `before-quit` → `setPaused()` 写标记 | `main.js` |
+| Claude Code 事件投递失败 | `sendEventWithLaunch` 见 `isPaused()` → 直接 return，不拉起 | `bridge-client.js` |
+| `claudepet start` | cli 先 `clearPaused()` 再 `launchApp()` | `cli.js` |
+| app 正常 boot | `clearPaused()` 自愈遗留标记 | `main.js boot()` |
+
+`sendEventWithLaunch` 改动：
+
+```js
+if (process.env.CLAUDEPET_NO_AUTO_LAUNCH === "1") return false;
+if (isPaused()) return false;   // ← 新增：用户已主动退出，不自动拉起
+if (!launchApp()) return false;
+```
+
+#### 关键边界：第二实例不能误写标记
+
+`main.js` 用 `requestSingleInstanceLock()` 做单例。当桌宠已在运行、又跑一次 `claudepet start` 时，新进程抢锁失败会立即 `app.quit()` —— 这会触发 `before-quit`，如果无条件 `setPaused()`，第二实例就会**误写**标记。
+
+虽然"运行中存在标记"本身无害（`isPaused` 只在 app 不可达、要走 launch 时才被检查），但有个真实坏场景：app 此后**崩溃**（非用户退出）→ 标记还在 → 下一个事件因 `isPaused()` 为真而拒绝自动拉起 → 用户没主动暂停却被卡住。
+
+修复：加 `didBoot` 守卫，只有真正 `boot()` 过的主实例退出才写标记：
+
+```js
+let didBoot = false;
+async function boot() { didBoot = true; clearPaused(); ... }
+app.on("before-quit", () => {
+  app.isQuitting = true;
+  if (didBoot) setPaused();   // 抢锁失败而 quit 的第二实例 didBoot=false，不写
+  if (bridge) bridge.close();
+});
+```
+
+抢锁失败的第二实例从不进 `boot()`，`didBoot` 保持 false，于是不写标记。
+
+### 10.2 开关桌宠：config.petVisible 统一显隐
+
+#### 配置
+
+`config.js` 加 `petVisible: true`（默认显示）。
+
+#### 统一显隐入口
+
+原先用一个运行时变量 `userHidden` 管隐藏状态，散落在多个地方（hidePet IPC、托盘显示/隐藏、通知点击、second-instance），且不持久。这次**删掉 `userHidden`**，全部统一到 `config.petVisible`：
+
+```js
+function applyPetVisibility() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  if (config.petVisible === false) {
+    if (petWindow.isVisible()) petWindow.hide();
+  } else if (!petWindow.isVisible()) {
+    petWindow.showInactive();
+  }
+}
+
+function setPetVisible(visible) {
+  config = saveConfig({ petVisible: Boolean(visible) });
+  applyPetVisibility();
+  broadcast();
+}
+```
+
+接线点：
+
+| 入口 | 改动 |
+| --- | --- |
+| `applyWindowConfig()` 末尾 | 调 `applyPetVisibility()`，让设置面板里的开关（走 update-config IPC）即时生效 |
+| `handleBridgeEvent` | `if (config.petVisible === false) return;` —— 隐藏时事件来了也不自动弹出 |
+| `hidePet` IPC / 托盘"隐藏桌宠" | → `setPetVisible(false)` |
+| 托盘"显示桌宠" / 通知点击 / second-instance | → `setPetVisible(true)`（或可见性判断） |
+| `createPetWindow` 的 `ready-to-show` | `if (config.petVisible !== false) petWindow.showInactive();` —— 启动时若配置为隐藏则保持隐藏 |
+
+#### UI
+
+「显示设置」开关区第一项新增：
+
+```html
+<label class="toggle with-toggle-icon">
+  ${icon("power")}
+  <input type="checkbox" ${config.petVisible !== false ? "checked" : ""} data-config-bool="petVisible">
+  <span>显示桌宠（关闭即隐藏窗口）</span>
+</label>
+```
+
+因为 `data-config-bool` → update-config → `applyWindowConfig` → `applyPetVisibility` 这条链已经打通，开关直接用通用绑定即可，不需要专门的 IPC。
+
+### 改动文件一览
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/shared/launch-flag.js`（新增） | isPaused / setPaused / clearPaused |
+| `src/shared/paths.js` | 加 `pausedFlagPath()` |
+| `src/shared/bridge-client.js` | `sendEventWithLaunch` 加 `isPaused()` 门控 |
+| `src/cli.js` | `start` 命令先 `clearPaused()` |
+| `src/shared/config.js` | 加 `petVisible: true` |
+| `src/main/main.js` | 删 `userHidden`；加 `applyPetVisibility` / `setPetVisible` / `didBoot`；before-quit 写标记；boot 清标记；ready-to-show 尊重 petVisible |
+| `src/renderer/renderer.js` | 显示设置加"显示桌宠"开关 |
+
+### 验证
+
+1. **开关桌宠**：设置 → 显示设置 → 取消"显示桌宠"，窗口立即消失；隐藏状态下让 Claude 跑任务，桌宠不自动冒出；重新勾选 → 窗口回来。
+2. **真退出**：点桌宠"关闭"按钮 → app 退出；让 Claude Code 继续跑，桌宠**不再**自动重启（`~/.claudepet/paused.flag` 此时存在）。
+3. **命令重启**：终端 `claudepet start` → 桌宠回来，标记被清除，自动拉起能力恢复。
+4. **第二实例不误暂停**：桌宠运行中再跑一次 `claudepet start` → 只是把现有窗口唤到前台，不会写 paused 标记。
+
+### 单元验证
+
+`launch-flag` 的读/写/清/幂等用临时 `CLAUDEPET_HOME` 跑过断言，全部通过；`config.petVisible` 默认值确认为 `true`。

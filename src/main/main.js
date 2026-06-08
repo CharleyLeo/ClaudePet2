@@ -5,6 +5,7 @@ const { loadConfig, saveConfig } = require("../shared/config");
 const { listPets, savePetManifest } = require("../shared/pets");
 const { loadRuntimeState, saveRuntimeState, appendHistory } = require("../shared/runtime-state");
 const { recordSnapshot, snapshotFromState, projectKeyFrom, pruneOldData, getUsageOverview } = require("../shared/usage");
+const { setPaused, clearPaused } = require("../shared/launch-flag");
 
 const APP_NAME = "ClaudePet";
 const APP_USER_MODEL_ID = "com.liuchenlili.ClaudePet";
@@ -23,7 +24,7 @@ let bridge = null;
 let config = loadConfig();
 let state = loadRuntimeState();
 let savePositionTimer = null;
-let userHidden = false;
+let didBoot = false;
 
 function rendererPayload() {
   return {
@@ -65,7 +66,47 @@ function recordUsageFromEvent(event) {
   }
 }
 
+function incomingCwd(event) {
+  if (event.type === "statusline") {
+    return event.state && event.state.session && event.state.session.cwd;
+  }
+  if (event.type === "hook") {
+    const raw = event.raw || {};
+    return raw.cwd || (raw.workspace && raw.workspace.current_dir) || null;
+  }
+  return null;
+}
+
+function maybeResetForCwdChange(event) {
+  // 用户在多个 Claude Code 终端窗口（不同 cwd）间切换时，旧会话的最后一条 detail 会
+  // 一直挂在桌宠气泡里直到新会话主动 fire 一次事件覆盖。这里检测到 cwd 变化时立刻把
+  // status 清回 idle，避免"切到新项目还看见旧项目的输出"。
+  const newCwd = incomingCwd(event);
+  const oldCwd = state.session && state.session.cwd;
+  if (!newCwd || !oldCwd || newCwd === oldCwd) return;
+  state = {
+    ...state,
+    session: {
+      ...(state.session || {}),
+      cwd: newCwd,
+      cwdName: path.basename(newCwd) || newCwd,
+      id: ""
+    },
+    status: {
+      kind: "idle",
+      label: "Claude Code is ready",
+      detail: "",
+      severity: "info",
+      attention: false,
+      animation: "idle",
+      updatedAt: new Date().toISOString()
+    },
+    activeSubagent: null
+  };
+}
+
 function updateStateFromEvent(event) {
+  maybeResetForCwdChange(event);
   if (event.type === "statusline") {
     const incoming = event.state.status || null;
     const activeStatus = isRecentActiveStatus(state.status) ? state.status : null;
@@ -146,8 +187,8 @@ function maybeNotify(status) {
     });
     n.on("click", () => {
       if (petWindow && !petWindow.isDestroyed()) {
-        userHidden = false;
-        if (!petWindow.isVisible()) petWindow.showInactive();
+        if (config.petVisible === false) setPetVisible(true);
+        else if (!petWindow.isVisible()) petWindow.showInactive();
         petWindow.focus();
       }
       showManager();
@@ -179,8 +220,24 @@ async function handleBridgeEvent(event) {
   updateStateFromEvent(event);
   broadcast();
   maybeNotify(event.status);
-  if (userHidden) return;
+  // 用户在「显示设置」里关掉桌宠（petVisible=false）时，事件来了也不自动弹出。
+  if (config.petVisible === false) return;
   if (petWindow && !petWindow.isVisible()) petWindow.showInactive();
+}
+
+function applyPetVisibility() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  if (config.petVisible === false) {
+    if (petWindow.isVisible()) petWindow.hide();
+  } else if (!petWindow.isVisible()) {
+    petWindow.showInactive();
+  }
+}
+
+function setPetVisible(visible) {
+  config = saveConfig({ petVisible: Boolean(visible) });
+  applyPetVisibility();
+  broadcast();
 }
 
 function assetPath(name) {
@@ -236,6 +293,7 @@ function applyWindowConfig() {
     // 用 setBounds 显式固定宽高，防止任何启动路径意外把窗口拉大。
     petWindow.setBounds({ x, y, width: PET_WINDOW_WIDTH, height: PET_WINDOW_HEIGHT }, false);
   }
+  applyPetVisibility();
 }
 
 function schedulePositionSave() {
@@ -278,7 +336,9 @@ function createPetWindow() {
   petWindow.once("ready-to-show", () => {
     applyWindowConfig();
     petWindow.setIgnoreMouseEvents(true, { forward: true });
-    petWindow.showInactive();
+    // 启动时若配置为"关闭桌宠"，保持隐藏（applyWindowConfig 里的 applyPetVisibility
+    // 已处理，这里仅在可见时显示）。
+    if (config.petVisible !== false) petWindow.showInactive();
   });
   petWindow.on("moved", schedulePositionSave);
 }
@@ -309,7 +369,15 @@ function createManagerWindow() {
 }
 
 function showManager() {
-  if (!managerWindow) createManagerWindow();
+  if (!managerWindow) {
+    createManagerWindow();
+    managerWindow.once("ready-to-show", () => {
+      if (!managerWindow || managerWindow.isDestroyed()) return;
+      managerWindow.show();
+      managerWindow.focus();
+    });
+    return;
+  }
   managerWindow.show();
   managerWindow.focus();
 }
@@ -415,17 +483,11 @@ function createTray() {
     Menu.buildFromTemplate([
       {
         label: "显示桌宠",
-        click: () => {
-          userHidden = false;
-          if (petWindow) petWindow.showInactive();
-        }
+        click: () => setPetVisible(true)
       },
       {
         label: "隐藏桌宠",
-        click: () => {
-          userHidden = true;
-          if (petWindow) petWindow.hide();
-        }
+        click: () => setPetVisible(false)
       },
       { label: "打开设置", icon: menuIconImage(), click: showManager },
       { type: "separator" },
@@ -463,8 +525,7 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle("claudepet:hide-pet", () => {
-    userHidden = true;
-    if (petWindow) petWindow.hide();
+    setPetVisible(false);
     return true;
   });
   ipcMain.handle("claudepet:drag-window", (_event, delta) => {
@@ -586,6 +647,9 @@ function clearStaleState() {
 }
 
 async function boot() {
+  didBoot = true;
+  // app 已经起来了，"暂停自动启动"标记没有意义了，清掉（自愈遗留标记）。
+  clearPaused();
   try {
     const retention = Number(config.stats && config.stats.retentionDays);
     if (Number.isFinite(retention) && retention > 0) pruneOldData(retention);
@@ -596,7 +660,8 @@ async function boot() {
   registerIpc();
   Menu.setApplicationMenu(buildAppMenu());
   createPetWindow();
-  createManagerWindow();
+  // managerWindow 改为懒创建：首次 showManager() 时才会 createManagerWindow()，
+  // 启动时不浪费内存（一个 BrowserWindow + preload + renderer 都不轻）。
   createTray();
   bridge = await startBridgeServer({
     getState: rendererPayload,
@@ -615,9 +680,10 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => {
+    // 再次执行 `claudepet start` 等于明确要求把桌宠唤回前台。
     if (petWindow && !petWindow.isDestroyed()) {
-      userHidden = false;
-      if (!petWindow.isVisible()) petWindow.showInactive();
+      if (config.petVisible === false) setPetVisible(true);
+      else if (!petWindow.isVisible()) petWindow.showInactive();
       petWindow.focus();
     }
   });
@@ -626,6 +692,10 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  // 用户主动退出（关闭按钮 / 托盘退出 / 菜单退出）→ 写"暂停自动启动"标记，
+  // 之后 Claude Code 的 hook 事件不会再把桌宠自动拉起，只能 `claudepet start` 手动重启。
+  // 仅在本实例真正 boot 过时才写：抢单例锁失败而 app.quit() 的"第二实例"不应写标记。
+  if (didBoot) setPaused();
   if (bridge) bridge.close();
 });
 

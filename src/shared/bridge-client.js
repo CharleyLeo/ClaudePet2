@@ -3,6 +3,7 @@ const http = require("node:http");
 const { spawn } = require("node:child_process");
 const { runtimePath, appRoot } = require("./paths");
 const { readJson } = require("./json-file");
+const { isPaused } = require("./launch-flag");
 
 function readRuntime() {
   return readJson(runtimePath(), null);
@@ -79,6 +80,8 @@ function delay(ms) {
 async function sendEventWithLaunch(payload) {
   if (await sendEvent(payload)) return true;
   if (process.env.CLAUDEPET_NO_AUTO_LAUNCH === "1") return false;
+  // 用户点关闭退出后写了 paused 标记 → 不自动拉起，只能用 `claudepet start` 重启。
+  if (isPaused()) return false;
   if (!launchApp()) return false;
   await delay(650);
   return sendEvent(payload, { timeoutMs: 700 });
