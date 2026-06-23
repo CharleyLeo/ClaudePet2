@@ -349,14 +349,27 @@ function createPetWindow() {
 }
 
 function createManagerWindow() {
+  // 从 config 读上次窗口尺寸,首次启动用默认 960×700
+  const stored = (config && config.managerWindow) || {};
+  const initialWidth = Math.max(820, Number(stored.width) || 960);
+  const initialHeight = Math.max(600, Number(stored.height) || 700);
+
   managerWindow = new BrowserWindow({
-    width: 960,
-    height: 700,
+    width: initialWidth,
+    height: initialHeight,
     minWidth: 820,
     minHeight: 600,
     show: false,
     title: "ClaudePet 设置中心",
     icon: windowIconPath(),
+    // 让 Windows 11 的 min/max/close 按钮直接画在我们的玻璃 header 上,
+    // 标题栏跟 header 视觉融合(再也没有那条突兀的白色系统栏)
+    titleBarStyle: "hidden",
+    titleBarOverlay: process.platform === "win32" ? {
+      color: "#0a0e1a",
+      symbolColor: "#c8d0e8",
+      height: 40
+    } : undefined,
     webPreferences: {
       preload: path.join(__dirname, "..", "preload.js"),
       contextIsolation: true,
@@ -365,6 +378,20 @@ function createManagerWindow() {
   });
   applyWindowAppDetails(managerWindow);
   managerWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"), { query: { view: "manager" } });
+
+  // 防抖持久化窗口尺寸:用户拖完边框 300ms 后才写盘,避免 resize 期间频繁 IO
+  let resizeTimer = null;
+  managerWindow.on("resize", () => {
+    if (!managerWindow || managerWindow.isDestroyed()) return;
+    if (managerWindow.isMaximized() || managerWindow.isMinimized() || managerWindow.isFullScreen()) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!managerWindow || managerWindow.isDestroyed()) return;
+      const [width, height] = managerWindow.getSize();
+      config = saveConfig({ managerWindow: { width, height } });
+    }, 300);
+  });
+
   managerWindow.on("close", (event) => {
     if (!app.isQuitting) {
       event.preventDefault();
@@ -663,7 +690,10 @@ async function boot() {
   }
   clearStaleState();
   registerIpc();
-  Menu.setApplicationMenu(buildAppMenu());
+  // 桌宠 app 用不到 "文件/编辑/视图/窗口/帮助" 这套标准菜单,且白色 menubar
+  // 跟玻璃 + 霓虹 header 视觉断层 —— 直接禁用应用菜单。
+  // 如需恢复:Menu.setApplicationMenu(buildAppMenu())。
+  Menu.setApplicationMenu(null);
   createPetWindow();
   // managerWindow 改为懒创建：首次 showManager() 时才会 createManagerWindow()，
   // 启动时不浪费内存（一个 BrowserWindow + preload + renderer 都不轻）。

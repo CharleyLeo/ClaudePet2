@@ -42,6 +42,8 @@
   },
   "homepage": "https://github.com/CharleyLeo/ClaudePet#readme",
   "devDependencies": {
-    "electron": "^42.0.0"
+    "electron": "^42.0.0",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.35.2"
   }
 }

@@ -1047,6 +1047,9 @@ function attachManagerEvents() {
   document.querySelectorAll("[data-pet-id]").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = button.dataset.petId;
+      // 真切了宠物才置位 flag(同 id 点击不重置 manifest 字段值)
+      const currentId = model.selectedManagerPet || (model.config && model.config.selectedPet);
+      if (id !== currentId) _suppressManifestRestore = true;
       model.selectedManagerPet = id;
       const next = await window.claudepet.updateConfig({ selectedPet: id });
       Object.assign(model, next);
@@ -1233,9 +1236,33 @@ function selectorForDataset(node) {
   return null;
 }
 
+// 哪些 dataset key 是"绑定到具体宠物 manifest"的 —— 切换宠物时不该 restore,
+// 否则 input 会把旧宠物的 displayName / description / frameWidth 等还原回来。
+const MANIFEST_DATA_KEYS = new Set([
+  "manifestNumber",
+  "manifestText",
+  "manifestAnchor",
+  "anim"
+]);
+
+// 一次性 flag:由 pet-card 点击 handler 在切换宠物前置位,被下一次
+// restoreManagerSnapshot 读取后清零。专门解决"snapshot 抓取时 model 已经更新,
+// 用 model 状态判断 petChanged 失效"的问题 —— 这个 flag 是"明确告知本次 restore
+// 跨了宠物边界"的旗语,跟时机解耦。
+let _suppressManifestRestore = false;
+
+function fieldKindFor(node) {
+  const ds = (node && node.dataset) || {};
+  for (const key of FOCUS_DATA_KEYS) {
+    if (ds[key] != null) return key;
+  }
+  return null;
+}
+
 function captureManagerSnapshot() {
   const root = document.querySelector(".manager-content");
   const snapshot = {
+    petId: (model.selectedManagerPet || (model.config && model.config.selectedPet)) || null,
     scrollTop: root ? root.scrollTop : 0,
     focus: null,
     fields: []
@@ -1244,8 +1271,9 @@ function captureManagerSnapshot() {
   root.querySelectorAll("input, textarea, select").forEach((node) => {
     if (node.disabled) return;
     const selector = selectorForDataset(node);
-    if (!selector) return;
-    const entry = { selector };
+    const kind = fieldKindFor(node);
+    if (!selector || !kind) return;
+    const entry = { selector, kind };
     if (node.type === "checkbox" || node.type === "radio") {
       entry.checked = node.checked;
     } else {
@@ -1257,7 +1285,7 @@ function captureManagerSnapshot() {
   if (active && active !== document.body && root.contains(active)) {
     const selector = selectorForDataset(active);
     if (selector) {
-      const focus = { selector };
+      const focus = { selector, kind: fieldKindFor(active) };
       if (typeof active.selectionStart === "number") {
         focus.selectionStart = active.selectionStart;
         focus.selectionEnd = active.selectionEnd;
@@ -1272,7 +1300,12 @@ function restoreManagerSnapshot(snapshot) {
   if (!snapshot) return;
   const root = document.querySelector(".manager-content");
   if (root) root.scrollTop = snapshot.scrollTop;
+  // 切换宠物的明确信号 —— pet-card 点击 handler 提前置位的 flag。
+  // 这一次 restore 后立刻清零,只影响当前这一帧的 manifest 字段恢复。
+  const petSwitch = _suppressManifestRestore;
+  _suppressManifestRestore = false;
   for (const entry of snapshot.fields || []) {
+    if (petSwitch && MANIFEST_DATA_KEYS.has(entry.kind)) continue;
     const target = document.querySelector(entry.selector);
     if (!target) continue;
     if ("checked" in entry) {
@@ -1282,6 +1315,7 @@ function restoreManagerSnapshot(snapshot) {
     }
   }
   if (snapshot.focus) {
+    if (petSwitch && MANIFEST_DATA_KEYS.has(snapshot.focus.kind)) return;
     const target = document.querySelector(snapshot.focus.selector);
     if (target) {
       target.focus({ preventScroll: true });

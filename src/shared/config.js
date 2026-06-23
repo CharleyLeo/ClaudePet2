@@ -14,6 +14,7 @@ const DEFAULT_CONFIG = {
   petVisible: true,
   soundWhenHidden: true,
   position: null,
+  managerWindow: { width: 960, height: 700 },
   notifications: {
     system: true,
     sound: false,

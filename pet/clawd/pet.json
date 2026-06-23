@@ -1,7 +1,7 @@
 {
   "id": "clawd",
   "displayName": "Clawd",
-  "description": "A compact Codex pet based on official Claude Code pixel Clawd frames, extracted without stretching.",
+  "description": "Claude Code 御用红色机甲小蜘蛛 Clawd, 八只眼盯紧你写的每一行代码 🦀 出 bug 就跳脚~",
   "spritesheetPath": "spritesheet.webp",
   "kind": "character",
   "frameWidth": 192,

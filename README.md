@@ -1,136 +1,47 @@
-# ClaudePet（Fork 增强版）
+# ClaudePet
 
-> 本仓库是 [**liuchenlili/ClaudePet**](https://github.com/liuchenlili/ClaudePet) 的 Fork，在原版基础上修了几个 HiDPI 拖动相关的 bug、把界面做了进一步汉化、把通知体系按事件类型重做了一遍，并补充了启动时的 stale state 自动清理。
->
-> 所有改动只覆盖渲染层、主进程的窗口/通知逻辑与少量配置项，未改动 `bridge / hook / statusline / pet manifest` 等原有协议；卸载逻辑与原版兼容。
->
-> 本项目仅用于技术研究学习之用，请勿用于商业用途，所以项目不会做任何适配！只保证在笔者手机上是可以正常运行的，代码开源，有问题或者建议欢迎提issues。
->
-> 详细改动可见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
+> 让 Claude Code 长出一只桌宠 — 实时显示会话状态、上下文消耗、token、花费,完成时弹通知响提示音。
 
-Claude Code 桌面宠物。通过 Claude Code 的 `statusLine` 和 `hooks` 把会话状态、上下文用量、git 状态、token 消耗、任务进度、需要注意的提示等显示在一个 Electron 小窗口里。支持 Windows / macOS / Linux。
+![桌宠主视图](png/zhuye.png)
+
+支持 Windows / macOS / Linux。
+
+详细改动记录见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
 
 ---
 
-## 截图
+## ✨ 核心能力
 
-**桌面常驻窗口** — 桌宠 + HP 条 + 气泡输出
-
-![桌面主视图](png/zhuye.png)
-
-**展开面板** — 实时 token、会话 ID、git 状态、本次花费等
-
-![展开后的详情面板](png/gengduo.png)
-
-**设置中心 · 宠物** — 切换、预览、可视化编辑 manifest
-
-![宠物管理页](png/petset.png)
-
-**设置中心 · 使用统计** — 按今日 / 7 天 / 30 天 / 全部，分项目和分日期的 token / 花费汇总
-
-![使用统计页](png/tongji.png)
+- **桌面常驻悬浮宠物** — 实时显示 Claude Code 状态:idle / thinking / running tool / waiting permission / done / error
+- **HP 上下文条** — 当前 context window 用量可视化,临近爆仓变黄变红
+- **展开详情面板** — 输入 / 输出 token、缓存读写、会话 id、git 分支、本次花费一栏看完
+- **三类通知 × 自定义提示音** — 完成 / 等权限 / 出错 各自独立开关,5 种音色 + 音量软放大到 200%
+- **使用统计** — 今日 / 7 天 / 30 天 / 全部,按项目维度 + 日期维度 token 与花费汇总
+- **5 只内置宠物 + 自定义** — IKun / 蜡笔小新 / 豆豆豆豆 / Clawd / Nimbus,可随时切换;支持从 codex-pets.net 下载更多
+- **玻璃拟态 + 霓虹设计** — Indigo → Cyan 渐变主色调,backdrop-filter 玻璃质感
+- **零侵入集成** — 通过 Claude Code 官方 `statusLine` + `hooks` 机制接入,卸载自动还原原配置
 
 ---
 
-## 本 Fork 相对原版的改动
+## 📸 截图
 
-> 下列改动**已合并到主线代码**，不再是可选项。每条都给出了原因 / 影响。
-
-### 1. 拖动桌宠时窗口"越来越大"的修复（真凶）
-
-**现象**：在 Windows + 系统缩放（DPI 125% / 150%）下，反复拖动桌宠会让悬浮窗口逐次横向放大，宠物 sprite 因受限于 `applyFrame({ fit: true })` 大小基本不变，看上去就像"和气泡越来越远"。
-
-**根因**：原版主进程拖动处理器是
-
-```js
-const [x, y] = petWindow.getPosition();
-petWindow.setPosition(x + dx, y + dy, false);
-```
-
-在 HiDPI 下 `setPosition` 走的 DIP → 物理像素换算每次会产生亚像素误差；叠加 `resizable: true`，反复调用累计放大。即便改成 `setBounds` 并显式带宽高，**如果宽高是从 `getBounds()` 回读**，依然会形成 438 → 438.x → 439 → 440 的反馈循环。
-
-**修复**（`src/main/main.js`）：
-
-- 文件顶部固化窗口尺寸常量 `PET_WINDOW_WIDTH = 438; PET_WINDOW_HEIGHT = 338;`，全场唯一真相
-- 拖动处理器**只回读 position（x, y），宽高用常量**，断掉反馈循环
-- `BrowserWindow` 构造加 `minWidth/minHeight/maxWidth/maxHeight + resizable: false` 作为双保险
-- 启动时 `applyWindowConfig()` 还原位置的逻辑也统一用常量、改 `setPosition` → `setBounds`
-- 顺手把 `window.setPointerCapture?.(event.pointerId)` 的错误调用修正为 `event.target.setPointerCapture(...)`（原版那行因为 `Window` 上没有此方法是无效的，会导致拖动时鼠标短暂滑出窗口后跳动）
-
-### 2. 应用菜单中文化
-
-原版 Electron 默认菜单是英文（File / Edit / View / Window / Help → Minimize / Zoom / Close...）。Fork 后在 `src/main/main.js` 新增 `buildAppMenu()`，按平台（mac / 非 mac）构造完整中文菜单：
-
-- 「文件」打开设置中心 / 退出
-- 「编辑」撤销 / 重做 / 剪切 / 复制 / 粘贴 / 删除 / 全选
-- 「视图」重新加载 / 强制重新加载 / 切换开发者工具 / 实际大小 / 放大 / 缩小 / 切换全屏
-- 「窗口」最小化 / 缩放 / 关闭（mac 下额外有"前置全部窗口"等）
-- 「帮助」打开项目主页
-
-在 `boot()` 里调用 `Menu.setApplicationMenu(buildAppMenu())` 全局生效。使用 `role` 字段保留 Electron 标准行为，通过 `label` 覆写显示文本。
-
-### 3. 通知体系按事件类型重做
-
-**原版**：所有 `status.attention === true` 的事件走同一个 `maybeNotify`，没法按"完成 / 等权限 / 出错"分别开关。
-
-**本 Fork**：
-
-- `src/shared/config.js` 的 `notifications` 新增三个分类开关：
-  ```js
-  notifications: {
-    system: true,         // 总开关
-    sound: false,
-    flashWindow: true,
-    onComplete: true,     // Claude 完成时通知
-    onPermission: true,   // 等待权限 / 输入时通知
-    onError: true         // 出错时通知
-  }
-  ```
-- `maybeNotify` 重写为基于 `notificationCategory(status)` 的分类调度：
-  - `kind === "completed"` → `onComplete`
-  - `kind === "waiting-permission" / "waiting-input" / "notification"` → `onPermission`
-  - `kind === "error" / "tool-error"` 或 `severity === "error"` → `onError`
-- 通知标题加 `[完成] / [需要交互] / [出错]` 前缀，便于在通知中心一眼分辨
-- 通知支持**点击激活**：点一下系统通知会自动唤起桌宠 + 打开设置中心
-- 新增 IPC `claudepet:test-notification(category)`：在设置里就能模拟一次真实通知通道
-- 新增 IPC `claudepet:reset-status`：一键把会话/状态字段清空（保留 cost / usage / git 等历史统计）
-- 「显示设置」拆出独立的「通知设置」section：6 个开关 + 3 个测试按钮（完成 / 权限 / 出错）+ 1 个「重置当前显示」按钮
-
-### 4. 启动时自动清理 stale state
-
-**原版**：`state.json` 是全局共享的，最后一次发事件的项目会冻在那儿；切到新项目后桌宠气泡会一直显示**上一个项目的旧目录 / 旧输出**，直到新项目的 hook 触发为止。
-
-**本 Fork**：`src/main/main.js` 新增 `clearStaleState()`，在 `boot()` 最前面调用：
-
-- 若 `state.updatedAt` > **30 分钟前** → 视为过期
-- 或 `state.session.cwd` 指向的目录已不存在 → 视为残留
-- 满足任意一条就把 `session.cwd / session.id / status` 等会话字段重置成 idle，**保留 cost / context / tokens / git / usage / history** 等统计
-
-如果自动清理没识别到，可以在设置里手动点「重置当前显示」按钮。
-
-### 5. 拖动奔跑动画提供开关
-
-原版拖动时强制切换到 `pet.animations.run`；Fork 后在 `src/shared/config.js` 加 `runOnDrag`（默认 `true` 保持原版行为），「显示设置」加同名开关，可一键关掉让桌宠在拖动期间保持当前姿势。
-
-### 6. 其他小修
-
-- 修正 `pointerdown` 内 `setPointerCapture` 的错误调用（同 #1 末尾）
-- 设置中心顶部的应用菜单完全中文化（同 #2）
+| | |
+|---|---|
+| ![桌宠主视图](png/zhuye.png) | ![展开详情](png/gengduo.png) |
+| **桌宠常驻** — 桌宠 + HP 条 + 实时气泡 | **展开面板** — token / git / 花费 一目了然 |
+| ![宠物管理](png/petset.png) | ![使用统计](png/tongji.png) |
+| **设置中心 · 宠物** — 切换、预览、可视化编辑 manifest | **设置中心 · 使用统计** — 多维度汇总 |
 
 ---
 
-## 前置要求
+## 🚀 5 分钟上手
 
-- Node.js 18+（Electron 42 要求）
-- Claude Code（CLI / Desktop / IDE 扩展任一）
+### 前置要求
 
----
+- Node.js **18+**(Electron 42 要求)
+- Claude Code(CLI / Desktop / IDE 扩展任一)
 
-## 下载与安装
-
-有两种方式拿到 ClaudePet：
-
-### 方式 A：从 GitHub 克隆（本 Fork）
+### 1. 克隆 + 安装依赖
 
 ```bash
 git clone https://github.com/CharleyLeo/ClaudePet.git
@@ -138,266 +49,256 @@ cd ClaudePet
 npm install
 ```
 
-> 也可以克隆原版 [`liuchenlili/ClaudePet`](https://github.com/liuchenlili/ClaudePet)，但**本 Fork 的拖动稳定性 / 通知分类 / stale state 自动清理 等功能仅本仓库有**。
+> `npm install` 只安装到当前目录的 `node_modules`,**不做任何全局动作**。装完不要再挪 ClaudePet 文件夹,集成时会把绝对路径写进 Claude Code 配置。
 
-### 方式 B：下载发布包
-
-从本 Fork 的 GitHub Releases 下载 ZIP，解压后进入 ClaudePet 目录：
-
-```bash
-cd <ClaudePet>
-npm install
-```
-
-`npm install` 只把依赖（主要是 `electron`）装到当前 `node_modules`，**不做任何全局安装**。
-
-> ⚠️ **不要装完后移动 ClaudePet 目录** — 集成时会把 ClaudePet 的绝对路径写进 Claude Code 的 `settings.json`，目录搬走了就失效，需要重新 install。
-
-记下当前 ClaudePet 路径，下文用 `<ClaudePet>` 占位（例：`D:\code\ClaudePet` 或 `~/code/ClaudePet`）。
-
----
-
-## 验证桌宠能独立启动
+### 2. 验证桌宠能独立启动
 
 ```bash
 npm start
 ```
 
-应该看到桌宠窗口出现在屏幕上。从系统托盘 → 退出 关掉即可。
-此时尚未与 Claude Code 集成，状态不会变化。
+桌宠应该出现在屏幕上。从系统托盘 → 退出 关掉即可(此时还没和 Claude Code 集成)。
 
----
-
-## 与 Claude Code 集成（三选一）
-
-### 方案 A：全局生效（推荐）
-
-所有项目都会自动唤起桌宠。
+### 3. 集成到 Claude Code
 
 ```bash
-cd <ClaudePet>
 npm run install:user
 ```
 
-写入 `~/.claude/settings.json`（Windows 是 `%USERPROFILE%\.claude\settings.json`），原文件会被备份成 `settings.json.claudepet-backup-<时间戳>`。
+写入 `~/.claude/settings.json`,**所有项目**都会自动唤起桌宠。原文件备份到 `settings.json.claudepet-backup-<时间戳>`。
 
-> ⚠️ `--preserve-statusline` 选项的语义是"备份原 statusLine 以便 uninstall 时还原"，**不是"安装时不动 statusLine"**。如果你之前用 `claude-hud` 等其他 statusline 插件，install 会覆盖它。需要保留原 statusline 的话，从备份文件里恢复 `statusLine` 字段（保留 `hooks` 字段不动）即可。
+> 只想对当前项目生效:用 `npm run install:local`,写到当前目录的 `.claude/settings.local.json`。
 
-### 方案 B：仅 ClaudePet 项目自身使用
+### 4. 起飞
 
-```bash
-cd <ClaudePet>
-npm run install:local
-```
-
-写入 `<ClaudePet>/.claude/settings.local.json`，只对 ClaudePet 仓库本身生效。
-
-### 方案 C：只让某个其他项目使用
-
-进到目标项目，调用 ClaudePet 的绝对路径：
-
-```bash
-cd <你的目标项目>
-node D:\coding\ClaudePet\bin\claudepet.js install --scope local --preserve-statusline
-# D:\coding\ClaudePet 替换为你本机的 ClaudePet 仓库路径
-```
-
-写入目标项目的 `.claude/settings.local.json`（git 默认忽略，不会污染团队配置）。
-
-> ⚠️ **不要直接** `npm run install:local`：那条命令的 cwd 是 ClaudePet 仓库自己（`src/cli.js:177`），会装错地方。
-
----
-
-## 启动桌宠
-
-集成后，桌宠会在 Claude Code 第一次触发 statusLine 或 hook 时**自动 spawn**，无需手动启动。
-
-也可以提前打开：
-
-```bash
-cd <ClaudePet>
-npm start
-```
-
-桌宠是**单实例**的（`app.requestSingleInstanceLock()`），多个 Claude Code 窗口、不同项目共用同一只宠物。
-
----
-
-## 常用命令
-
-```bash
-node <ClaudePet>/bin/claudepet.js doctor       # 显示 home、runtime 端口、Electron 路径、可用宠物
-node <ClaudePet>/bin/claudepet.js pets         # 列出可用宠物
-node <ClaudePet>/bin/claudepet.js start        # 等同 npm start
-node <ClaudePet>/bin/claudepet.js --help       # 全部命令
-```
-
-PowerShell 用户可以加个简写。在 `$PROFILE` 里：
+任何 Claude Code 终端跑起来,桌宠会自动唤起并显示当前会话状态。也可以在 PowerShell 里加快捷:
 
 ```powershell
 function claudepet { node D:\path\to\ClaudePet\bin\claudepet.js @args }
 ```
 
-之后直接 `claudepet doctor`、`claudepet install --scope local` 等。
+之后 `claudepet doctor` / `claudepet start` 等命令直接用。
 
 ---
 
-## 卸载
+## 🎨 宠物
 
-```bash
-cd <ClaudePet>
-npm run uninstall:user      # 移除全局集成
-npm run uninstall:local     # 移除 ClaudePet 自身项目的集成
+5 只内置,**托盘 → 打开设置 → 「宠物」tab** 一键切换:
+
+| 宠物 | 名 | 简介 |
+|---|---|---|
+| `clawd` | Clawd | Claude Code 御用红色机甲小蜘蛛,八只眼盯紧你写的每一行代码 |
+| `doudoudoudou` | 豆豆豆豆 | 戴粉兔耳帽的话痨小豆,唠叨 / 摸鱼 / 抓Bug / 庆功 一条龙 |
+| `ikkun` | IKun | 练习两年半的练习生,喜欢唱跳 RAP 篮球 |
+| `nimbus` | Nimbus | 龙之子卡卡罗特,座驾筋斗云,饭量是程序员的三倍 |
+| `shinchan` | 蜡笔小新 | 春日部最强 5 岁幼儿园大班生,擅长大象舞、模仿动感超人 |
+
+### 添加新宠物
+
+到 <https://codex-pets.net/> 下载一个 ZIP,里面是一个含 `pet.json` + `spritesheet.webp` 的文件夹。直接解压到 `pet/` 目录下,重启桌宠 → 「宠物」tab 就能看到。
+
+```
+ClaudePet/
+  pet/
+    <你的宠物 id>/
+      pet.json
+      spritesheet.webp
 ```
 
-卸载某个目标项目：
+### 自己做宠物
 
-```bash
-cd <你的目标项目>
-node <ClaudePet>/bin/claudepet.js uninstall --scope local
-```
-
-卸载会从 settings.json 中移除 ClaudePet 注入的 statusLine 和 hooks，并尽可能恢复原 statusLine（如果安装时 `--preserve-statusline` 保存过）。备份文件保留在原位置不会自动删。
-
-完全清除：再删除 `~/.claudepet/` 目录和那些 `*.claudepet-backup-*` 备份即可。
+宠物 = 一张精灵图 + 一份 manifest。精灵图按网格切成 7 套动画帧:`idle / thinking / tool / waiting / success / error / run`。具体字段在「设置中心 → 宠物 → 选中宠物」里可视化编辑,改完保存自动写入 `pet/<id>/pet.json`。
 
 ---
 
-## 故障排查
+## 🔔 通知与提示音
 
-| 现象 | 检查 |
-|---|---|
-| 桌宠不出现 | `claudepet doctor` 看 `runtime` 字段；显示 `not running` 就 `npm start` 手动启动 |
-| statusLine 没变化 | 看 `~/.claude/settings.json` 的 `statusLine.command` 是否包含 `claudepet.js`，被其他工具覆盖了就重装 |
-| 状态长时间停在 idle | hook 没装齐。settings 的 `hooks` 块应该有 15 个事件每个都含 claudepet 条目，重装即可 |
-| 改了 ClaudePet 目录位置 | 路径是写死的，搬动后必须重新 install |
-| 多窗口/多项目重复弹窗 | 不会，单实例锁会让第二个进程立刻退出 |
-| 拖动时窗口横向越来越大 | 本 Fork 已修；如果你用的是原版仓库或老版本，参见上文「拖动桌宠时窗口"越来越大"的修复」 |
-| 切换项目后气泡显示旧目录内容 | 重启 ClaudePet 触发 `clearStaleState()` 自动清，或设置 → 通知设置 → 「重置当前显示」 |
-| 完成 / 权限 / 出错没收到通知 | 设置 → 通知设置，按对应「测试」按钮验证通道；总开关「启用系统通知」要开；确认 hooks 已装到正确 scope |
+### 三类系统通知(可独立开关)
+
+| 类型 | 触发 | 标题前缀 |
+|---|---|---|
+| `onComplete` | Claude 完成一轮回复 | `[完成]` |
+| `onPermission` | 等待权限授予 / 输入回复 | `[需要交互]` |
+| `onError` | 工具失败 / 会话出错 | `[出错]` |
+
+点通知能直接唤起桌宠 + 打开设置中心。在「显示设置 → 通知设置」可以分别开关,还有"测试"按钮验证通道是否畅通。
+
+### 自定义提示音
+
+跟系统通知**同步触发**,5 种内置音色:
+
+- `ding` 叮咚
+- `bell` 铃声
+- `chime` 钟声
+- `success` 成功
+- `task-complete` 任务完成
+
+音量 0~200%(底层用 Web Audio + GainNode 软放大,超过 150% 可能略失真)。"显示设置 → 提示音"里有试听按钮。
+
+### 藏桌宠但保留提示音
+
+「显示设置」加了两个开关:
+
+- **显示桌宠** — 关掉后窗口隐藏,但 Claude Code 事件仍会触发通知
+- **隐藏桌宠时仍播放提示音** — 默认开,关掉则桌宠隐藏后连提示音也静音
 
 ---
 
-## 集成做了什么（深入了解）
+## ⚙️ 设置 & 统计
 
-`install --scope user` 等价于：
+「设置中心」三个 tab:
 
-1. 备份 `~/.claude/settings.json` → `settings.json.claudepet-backup-<时间戳>`
-2. 把原 `statusLine`（若不是 ClaudePet）保存为 ClaudePet 的 `legacyStatusLine`，桌宠收到 statusLine 时会代为转发它的输出
+- **宠物** — 切换 / 自定义 / 编辑 manifest / 预览动画
+- **显示设置** — 大小 / 透明度 / 总在最前 / 拖动奔跑动画 / 通知开关 / 提示音
+- **使用统计** — 今日 / 7 天 / 30 天 / 全部,按项目和日期分组的 token 与花费
+
+所有配置存在 `~/.claudepet/config.json`,手动改也行(重启生效)。
+
+---
+
+## 🛠️ 工作原理
+
+ClaudePet 通过 Claude Code 官方机制集成,不打补丁、不拦截、不动 Claude 进程。`npm run install:user` 等价于:
+
+1. 备份 `~/.claude/settings.json` 到 `.claudepet-backup-<时间戳>`
+2. 把原 `statusLine`(如有,例如 `claude-hud`)保存为 ClaudePet 的 `legacyStatusLine`,桌宠收到 statusline 时会代为转发
 3. 改写 `statusLine.command` 为 `node <ClaudePet>/bin/claudepet.js statusline`
-4. 给以下 15 个 hook 各追加一条 `node <ClaudePet>/bin/claudepet.js hook` 命令（如尚未存在）：
+4. 给以下 **15 个 hook** 各追加一条 `node <ClaudePet>/bin/claudepet.js hook` 命令:
+
    ```
    UserPromptSubmit, PermissionRequest, Notification,
    PreToolUse, PostToolUse, PostToolUseFailure, PostToolBatch,
    SubagentStart, SubagentStop, TaskCreated, TaskCompleted,
    Stop, StopFailure, PreCompact, PostCompact
    ```
-   全部 `async: true; timeout: 5`，不会阻塞 Claude Code。
-5. ClaudePet 自己的配置存在 `~/.claudepet/`（`config.json` / `state.json` / `runtime.json`），可用环境变量 `CLAUDEPET_HOME`、`CLAUDE_HOME` 自定义。
+
+   全部 `async: true`,不阻塞 Claude Code。
+
+ClaudePet 自身的数据(配置 / 运行时状态 / 使用统计)在 `~/.claudepet/`(可用环境变量 `CLAUDEPET_HOME` 自定义)。
 
 ---
 
-## 自定义宠物
-
-`pet/<id>/` 目录下放：
-
-- `pet.json`（manifest）
-- `spritesheet.webp`
-
-manifest 支持 `frameWidth`、`frameHeight`、`columns`、`rows`、`defaultScale`、`anchor`，以及七种动画：`idle`、`thinking`、`tool`、`waiting`、`success`、`error`、`run`。
-
-桌宠系统托盘 → 打开设置 可视化编辑、切换宠物。内置三只宠物 `ikkun` / `clawd` / `nimbus` 的 spritesheet 是 `1536x1872`，按 `192x208` 帧 `8x9` 网格切分。
-
-### 下载更多宠物
-
-到 <https://codex-pets.net/> 选喜欢的宠物，下载得到一个 ZIP（里面是一个含 `pet.json` 和 `spritesheet.webp` 的文件夹）。
-
-直接解压到 ClaudePet 的 `pet/` 目录下：
-
-```text
-<ClaudePet>/
-  pet/
-    <下载的宠物文件夹>/
-      pet.json
-      spritesheet.webp
-```
-
-然后重启 ClaudePet，托盘 → 打开设置 → 「宠物」页面就能看到并切换。
-
-### 安装别人分享的 Pet
-
-别人分享 Pet 时，通常会给你一个文件夹或 ZIP。确认解压后结构类似：
-
-```text
-your-pet/
-  pet.json
-  spritesheet.webp
-```
-
-把整个 `your-pet/` 文件夹放到 ClaudePet 的 `pet/` 目录下：
-
-```text
-<ClaudePet>/
-  pet/
-    your-pet/
-      pet.json
-      spritesheet.webp
-```
-
-然后重启 ClaudePet，或从托盘打开设置，在「宠物」页选择新 Pet。
-
-### 分享自己的 Pet
-
-只需要打包 `pet/<id>/` 这个单独文件夹。文件夹名就是 Pet 的唯一 ID；`pet.json` 里的 `spritesheetPath` 默认指向同目录下的 `spritesheet.webp`。
-
----
-
-## 桌宠展示什么
-
-- **上下文容量**：使用百分比、窗口大小、实时 token
-- **会话**：id、cwd、模型、Claude Code 版本、花费、用时
-- **token**：实时 input/output、来自 transcript 的整 session 累计
-- **git**：分支、dirty/staged/untracked/ahead/behind
-- **任务状态**：idle、thinking、running tool、waiting permission、waiting input、subagent running、task created/completed、completed、error、compacting
-
-权限请求、输入提示等需要"注意"的状态会高亮气泡并触发系统通知（本 Fork 已按事件类型拆分成 `onComplete / onPermission / onError` 三个独立开关）。
-
----
-
-## 开发与测试
+## 🧰 命令行工具
 
 ```bash
-npm test         # 运行所有测试
+node bin/claudepet.js doctor       # 显示 home、runtime 端口、Electron 路径、可用宠物
+node bin/claudepet.js pets         # 列出可用宠物
+node bin/claudepet.js start        # 启动桌宠(=npm start)
+node bin/claudepet.js --help       # 全部命令
+```
+
+如果你按 [5 分钟上手 / 步骤 4](#4-起飞) 设了 `claudepet` PowerShell 函数,前缀都可以省掉。
+
+---
+
+## 📁 项目结构
+
+```
+ClaudePet/
+├─ bin/claudepet.js          # CLI 入口
+├─ src/
+│  ├─ cli.js                 # statusline / hook / install 等子命令
+│  ├─ main/main.js           # Electron 主进程(窗口、托盘、菜单、通知)
+│  ├─ preload.js             # 渲染层 IPC 桥
+│  ├─ renderer/              # 桌宠 + 设置中心 UI
+│  │  ├─ index.html
+│  │  ├─ renderer.js
+│  │  ├─ styles.css          # 玻璃拟态 + 霓虹设计系统
+│  │  └─ assets/             # 应用图标、内置提示音 wav
+│  └─ shared/                # 配置、宠物、状态、bridge、安装器等共享模块
+├─ pet/                      # 内置宠物(每个目录一只:pet.json + spritesheet.webp)
+├─ scripts/                  # 一次性工具(图标生成、wav 归一化、并发测试)
+├─ docs/CHANGELOG.md         # 滚动更新的改动记录
+└─ test/                     # 单元测试
+```
+
+---
+
+## 🧯 故障排查
+
+| 现象 | 检查 |
+|---|---|
+| 桌宠不出现 | `claudepet doctor` 看 `runtime` 字段;`not running` 就 `npm start` 手动起 |
+| statusLine 没变化 | `~/.claude/settings.json` 的 `statusLine.command` 是否含 `claudepet.js`,被其他工具覆盖了就重装 |
+| 状态长时间停在 idle | hook 没装齐;`settings.json` 的 `hooks` 块应该有 15 个事件每个含 claudepet 条目,重装即可 |
+| 改了 ClaudePet 目录位置 | hook / statusLine 都是绝对路径;搬目录后重新跑 `npm run install:user` 即可自动覆写(详见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md) 六节) |
+| 多窗口 / 多项目重复弹窗 | 不会,单实例锁会让第二个进程立刻退出 |
+| 切换项目后气泡显示旧目录内容 | 重启桌宠 → 自动 `clearStaleState` 清理;或「显示设置 → 通知设置 → 重置当前显示」 |
+| 完成 / 权限 / 出错收不到通知 | 「显示设置 → 通知设置」按对应"测试"按钮验证,总开关「启用系统通知」要开;hooks 装到对的 scope |
+| 关掉桌宠又自动重启 | 设计如此(被 Claude Code 事件唤起)。要彻底退出,关闭后下次重新 `claudepet start` 才会启动 |
+
+---
+
+## 🔌 卸载
+
+```bash
+npm run uninstall:user      # 移除全局集成
+npm run uninstall:local     # 移除当前项目集成
+```
+
+卸载会:
+
+- 从 settings.json 移除 ClaudePet 注入的 statusLine + hooks
+- 尽量还原原 statusLine(如安装时保存过 `legacyStatusLine`)
+- 备份文件保留在原位置不删
+
+彻底清干净:再 `rm -rf ~/.claudepet/` 和那些 `*.claudepet-backup-*` 备份。
+
+---
+
+## 🛠️ 开发
+
+```bash
+npm test         # 运行所有单元测试(install/uninstall、状态机、manifest 解析等)
 npm run dev      # Electron 开发模式
 ```
 
-测试覆盖 install/uninstall、状态机、宠物 manifest、transcript 解析等。
+需要重新生成应用图标(基于 IKun 第 0 帧):
+
+```bash
+node scripts/generate-app-icon.js
+```
+
+需要把内置提示音重新归一化峰值(默认目标 -0.5 dBFS):
+
+```bash
+npm run sounds:normalize       # 归一化
+npm run sounds:restore         # 还原备份
+```
+
+完整改动记录、bug 修复历史、设计决策 → [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。
 
 ---
 
-## 上线前功能审查
+## 🤝 致谢
 
-发布前建议按这张清单走一遍：
+ClaudePet 基于 [**liuchenlili/ClaudePet**](https://github.com/liuchenlili/ClaudePet) 的原始架构延续开发。原作者建立了核心的 bridge / hook / statusLine / 宠物渲染 / 使用统计 等能力,本仓库在此基础上做了视觉重构、新功能扩展和长期维护。感兴趣的同学也欢迎去看看原版。
 
-- 准备 GitHub Releases 下载包（本 Fork 仓库：`https://github.com/CharleyLeo/ClaudePet`）。
-- `npm install` 后运行 `npm test`，确认 install/uninstall、状态机、宠物 manifest、transcript 解析都通过。
-- 运行 `npm start`，检查桌宠窗口、托盘菜单、设置中心「宠物 / 显示设置 / 使用统计」三个页签。
-- 运行 `node bin/claudepet.js doctor` 和 `node bin/claudepet.js pets`，确认 runtime、Electron 路径和内置宠物都可读。
-- 测试 `npm run install:user` 或 `npm run install:local`，确认 Claude Code 的 `statusLine` 和 15 个 hooks 写入成功。
-- 把一个外部 Pet 文件夹复制到 `pet/<id>/`，重启后确认能在设置中心选择并播放七种动画。
-- 测试权限请求、等待输入、工具失败、Stop 完成等状态，确认气泡高亮、系统通知和动画切换符合预期。
-- **本 Fork 额外项**：在 HiDPI 屏（125% / 150%）反复拖动桌宠 50 次以上，窗口宽高应稳定不变；在设置中心点三个「测试通知」按钮分别验证三类通知；切换不同项目后启动桌宠，确认 `clearStaleState` 自动清理旧目录数据。
-
----
-
-## 致谢
-
-- 原作者 [**liuchenlili**](https://github.com/liuchenlili) 与原版仓库 [**liuchenlili/ClaudePet**](https://github.com/liuchenlili/ClaudePet)：本 Fork 的所有基础架构、桌宠 sprite、设置中心、bridge / hook / statusline / 使用统计 等核心功能全部来自原版；Fork 只是在此之上做了几个 bug 修复和 UX 增强。强烈建议先看原版的 README 与代码结构。
-- 感谢 [linux.do](https://linux.do/) 社区在开发过程中提供的反馈、讨论和灵感。
-- 感谢 [Claude Code](https://claude.com/claude-code) —— 整套 statusLine / hooks 体系是 ClaudePet 能存在的前提，大量代码也是在 Claude Code 协助下完成的。
+- [**liuchenlili**](https://github.com/liuchenlili) — 原作者
+- [**Claude Code**](https://claude.com/claude-code) — 整套 statusLine / hooks 体系是 ClaudePet 存在的前提
+- [**linux.do**](https://linux.do/) 社区 — 开发期反馈与讨论
 
 ---
 
 ## License
 
-MIT（沿用原版协议）
+MIT — 见 [LICENSE](LICENSE)。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
