@@ -5,3 +5,5 @@ out/
 .claude/settings.local.json
 .claudepet/
 *.log
+/bash.exe.stackdump
+/.idea/db-forest-config.xml
