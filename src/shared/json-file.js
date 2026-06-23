@@ -18,7 +18,7 @@ function readJson(file, fallback = null) {
   } catch (error) {
     if (error instanceof SyntaxError) {
       // 坏 JSON 留证据再返回 fallback：避免一次写坏（如 hook 并发互踩）就把整条
-      // statusline 链路永久阻断。详见 docs/优化记录_ClaudePet2_state_json损坏_20260623.md
+      // statusline 链路永久阻断。详见 docs/优化记录_ClaudePet_state_json损坏_20260623.md
       try {
         const backup = `${file}.broken.${Date.now()}`;
         fs.renameSync(file, backup);

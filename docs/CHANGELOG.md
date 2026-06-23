@@ -10,7 +10,7 @@
 - 三点五、通知体系改造（A. hooks 没装 / B. 增强 maybeNotify / C. 启动清理 stale state）
 - 四、已知遗留问题：切换 Claude Code 会话时显示旧目录的内容
 - 五、整体验证清单
-- 六、项目重命名（ClaudePet → ClaudePet2）：迁移与 install bug 修复
+- 六、`install.js` mergeHooks bug 修复（重装时不刷新已有 hook 路径）
 - 七、Windows 上 legacy statusLine 兼容（Git Bash 检测）
 - 八、自定义通知提示音（含 Web Audio 改造 + wav 峰值归一化脚本）
 - 九、批量优化（CSS 变量、sound manifest、滑条美化、Manager 懒加载、cwd 切换 reset）
@@ -444,43 +444,25 @@ ClaudePet 的渲染状态由 `src/main/main.js` 里的全局 `state` 维护：
 
 ---
 
-## 六、项目重命名（ClaudePet → ClaudePet2）：迁移与 install bug 修复
+## 六、`install.js` mergeHooks bug 修复（重装时不刷新已有 hook 路径）
 
 ### 现象
 
-用户把项目文件夹从 `D:\tools\ClaudePet` 改名为 `D:\tools\ClaudePet2` 后，出现一连串问题：
+把 ClaudePet 整个目录移到新位置（换盘符、改路径、跨机器同步等）后，重新执行 `claudepet install --scope user --preserve-statusline`，`~/.claude/settings.json` 里的 `statusLine.command` 字段被正确覆写到新路径，但 **14 个 hook 项的 command 仍然指向旧路径**。后果是 Claude Code 触发事件时调用的还是旧仓库里的 `bin/claudepet.js`，事件根本进不了新版 bridge。表现层就是"HP 进度条不更新、状态卡在旧快照、新加的功能不生效"。
 
-- 桌宠 HP 进度条不更新；
-- `claude --continue` 在新目录下找不到旧会话历史；
-- `claudepet start` 跑的还是旧目录的代码（虽然新代码在跑，但行为像旧版）；
-- 重新执行 `claudepet install --scope user --preserve-statusline` 之后，settings.json 的 statusLine 字段被正确更新到新路径，**hooks 字段依然指向旧路径**。
+### 根因
 
-### 根因有四条互相耦合
+`src/shared/install.js` 的 `mergeHooks` 老代码核心是一句：
 
-1. **PowerShell `$PROFILE` 里的 shim 写死了旧路径**：
-   `C:\Users\charley\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1` 里有
-   ```powershell
-   function claudepet { node D:\tools\ClaudePet\bin\claudepet.js @args }
-   ```
-   于是终端敲的 `claudepet ...` 都走旧目录的代码。
+```js
+if (!existing.some(hasCcpetHook)) existing.push(buildHookEntry(matcher, hookCommand));
+```
 
-2. **`~/.claude/settings.json` 的 14 个 hook 项仍指向旧路径**。Claude Code 触发事件时调用的是旧仓库里的 `bin/claudepet.js`，事件不会进新版的 bridge。
-
-3. **statusLine 被 `claude-hud` 插件占用**（非 claudepet）。但 HP 条的 `usedPercentage` 是 `buildStatusLineState`（`src/shared/state.js`）解析 statusLine 输入里 `context_window` 字段得到的——claudepet 拿不到这个数据流，HP 就停在历史快照上。
-
-4. **`src/shared/install.js` 的 `mergeHooks` 有一个老 bug**：
-   ```js
-   if (!existing.some(hasCcpetHook)) existing.push(buildHookEntry(matcher, hookCommand));
-   ```
-   检测到已存在含 `claudepet.js` 的 hook 就直接跳过，**不会把旧路径换成新路径**。所以哪怕重新跑 `install`，hook 路径也不刷新。
-
-5. **Claude Code 按 cwd 路径分项目存会话**（`~/.claude/projects/<打平的路径>/`）。`D--tools-ClaudePet` 和 `D--tools-ClaudePet2` 是两个独立 project key，重命名后 `claude --continue` 在新 key 下找不到任何会话。
+它的语义只是"如果这个事件下还没有 claudepet 条目，就 append 一条"——纯粹的**防重复 append** 保护，**完全没有覆写旧路径**这一步。所以哪怕重新跑 `install`，只要那条旧 hook 还在，新路径就插不进去；旧路径还原封不动。
 
 ### 修复
 
-#### 1. `src/shared/install.js` — `mergeHooks` 改成会刷新已有路径
-
-新增 `refreshCcpetCommands(entry, hookCommand)`：
+新增 `refreshCcpetCommands(entry, hookCommand)`，先对每个事件里已有的 claudepet 条目做一次路径覆写，再判断是否要 append：
 
 ```js
 function refreshCcpetCommands(entry, hookCommand) {
@@ -507,33 +489,31 @@ function mergeHooks(settings, hookCommand) {
 ```
 
 要点：
+
 - **先对所有已有 entry 做一次 refresh**（把旧 path 覆写成新 path），再判断要不要 append。
 - 用 `hook.command !== hookCommand` 跳过已经是最新值的 hook，避免无谓的对象重建。
-- 不动其他非 claudepet 的 hook（比如用户自己装的其它工具）。
+- 用 `isClaudepetCommand` 精确识别 —— 不动其他非 claudepet 的 hook，用户自己装的其它工具不会被误改。
 
-#### 2. 一次性迁移（手动 + 命令）
+### 验证
 
-| 步骤 | 操作 |
-| --- | --- |
-| a. PROFILE 函数指向新路径 | 把 `Microsoft.PowerShell_profile.ps1` 里的 `D:\tools\ClaudePet` 改成 `D:\tools\ClaudePet2`，下次开 PowerShell 或 `. $PROFILE` 生效 |
-| b. 恢复旧会话 | `cp ~/.claude/projects/D--tools-ClaudePet/*.jsonl ~/.claude/projects/D--tools-ClaudePet2/` |
-| c. 让 claudepet 接管 statusLine 同时保留 claude-hud 渲染 | 在 `D:\tools\ClaudePet2` 下跑 `node bin/claudepet.js install --scope user --preserve-statusline` |
-| d. 修复 hooks 旧路径残留 | `mergeHooks` 修了之后再跑一次 install 即可；修之前需要手动 grep + 替换 settings.json |
+移动 ClaudePet 目录后只需要一条命令：
 
-#### 3. 验证
+```bash
+cd <ClaudePet 新路径>
+node bin/claudepet.js install --scope user --preserve-statusline
+```
 
-- `~/.claude/settings.json` 里 `grep ClaudePet`，只应出现 `ClaudePet2`；
-- 打开 Claude Code 跑一段对话，HP 条会随着 token 用量爬升；
-- `claude --continue` 在新目录下能恢复之前那条历史会话；
-- 终端 `claudepet doctor` 输出指向 `~/.claudepet/`，且 Electron 路径可见。
+跑完确认：
 
-### 将来再次改项目目录怎么办
+- `grep claudepet.js ~/.claude/settings.json` —— 14 处 hook + 1 处 statusLine 全部指向新路径；
+- 打开 Claude Code 跑一段对话，HP 条随着 token 用量爬升；
+- 终端 `claudepet doctor` 输出指向 `~/.claudepet/`，Electron 路径可见。
 
-修好 `mergeHooks` 之后流程极简：
+### 顺带影响
 
-1. PROFILE 函数路径同步；
-2. 旧 project 目录的 `.jsonl` 搬过来（如要保留会话）；
-3. 跑 `claudepet install --scope user [--preserve-statusline]` —— 一次同步 statusLine + 14 个 hook + backup。
+`refreshCcpetCommands` 让"目录搬迁后重新接入"这件事流程极简：搬完目录直接跑一次 `install`，14 个 hook + statusLine 一次性全部覆写就位，不需要手动 `grep + 替换 settings.json`。
+
+> 还需要手动同步的，只剩 PowerShell `$PROFILE` 里 `function claudepet { node <绝对路径> ... }` 这条 shim —— 它不在 ClaudePet 管控范围内，纯属用户终端环境。
 
 ---
 
@@ -541,7 +521,7 @@ function mergeHooks(settings, hookCommand) {
 
 ### 现象
 
-执行 `install --preserve-statusline` 后，`~/.claudepet/config.json` 里有 `legacyStatusLine.command`（claude-hud 的命令），按理 cli.js 在最后会调用它并把输出写回 stdout 给 Claude Code 显示。可是 Claude Code 终端 statusLine 显示的是 ClaudePet 的 fallback 文本（`Opus 4.7 | ClaudePet2 | ctx 9% | in ...`），不是 claude-hud 的样式。
+执行 `install --preserve-statusline` 后，`~/.claudepet/config.json` 里有 `legacyStatusLine.command`（claude-hud 的命令），按理 cli.js 在最后会调用它并把输出写回 stdout 给 Claude Code 显示。可是 Claude Code 终端 statusLine 显示的是 ClaudePet 的 fallback 文本（`Opus 4.7 | ClaudePet | ctx 9% | in ...`），不是 claude-hud 的样式。
 
 ### 根因
 
@@ -598,7 +578,7 @@ const child = bash
 echo '{"context_window":{"used_percentage":9,...}}' | node bin/claudepet.js statusline
 ```
 
-应输出 `[claude-hud] 正在初始化...` 这类 claude-hud 的产物（首次启动）或正式 statusLine 行，而不是 `Opus 4.7 | ClaudePet2 | ctx ... | ...` 的 fallback。
+应输出 `[claude-hud] 正在初始化...` 这类 claude-hud 的产物（首次启动）或正式 statusLine 行，而不是 `Opus 4.7 | ClaudePet | ctx ... | ...` 的 fallback。
 
 实际使用上：等 2 秒（Claude Code statusLine refreshInterval = 2），命令行 statusLine 会自动恢复 claude-hud 样式；桌宠仍能拿到 `context_window` 数据正常更新 HP。
 
@@ -1346,8 +1326,8 @@ function playNotificationSound(category) {
 
 ## 十二、state.json 并发损坏修复（原子写 + 坏文件自愈）
 
-> 来源问题报告：`docs/优化记录_ClaudePet2_state_json损坏_20260623.md`。
-> 现象是 Claude Code 状态栏整条**完全空白**——claude-hud 也被连带卡住，根因在 ClaudePet2 自己。
+> 来源问题报告：`docs/优化记录_ClaudePet_state_json损坏_20260623.md`。
+> 现象是 Claude Code 状态栏整条**完全空白**——claude-hud 也被连带卡住，根因在 ClaudePet 自己。
 
 ### 现象与根因
 
@@ -1492,4 +1472,4 @@ second readJson: {"secondRead":true}        ← 第二次自然走 ENOENT → fa
 
 ### 相关历史
 
-事故详情见 `docs/优化记录_ClaudePet2_state_json损坏_20260623.md`。当时的临时处理是把坏文件备份到 `~/.claudepet/state.json.broken.20260623-104658` 并 `echo '{}'` 重置——本节修复后这种手动复活流程不再需要，自动走 `.broken.<ts>` 备份 + fallback 返回。
+事故详情见 `docs/优化记录_ClaudePet_state_json损坏_20260623.md`。当时的临时处理是把坏文件备份到 `~/.claudepet/state.json.broken.20260623-104658` 并 `echo '{}'` 重置——本节修复后这种手动复活流程不再需要，自动走 `.broken.<ts>` 备份 + fallback 返回。

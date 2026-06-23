@@ -133,7 +133,7 @@ petWindow.setPosition(x + dx, y + dy, false);
 ### 方式 A：从 GitHub 克隆（本 Fork）
 
 ```bash
-git clone https://github.com/CharleyLeo/ClaudePet2.git
+git clone https://github.com/CharleyLeo/ClaudePet.git
 cd ClaudePet
 npm install
 ```
@@ -379,7 +379,7 @@ npm run dev      # Electron 开发模式
 
 发布前建议按这张清单走一遍：
 
-- 准备 GitHub Releases 下载包（本 Fork 仓库：`https://github.com/CharleyLeo/ClaudePet2`）。
+- 准备 GitHub Releases 下载包（本 Fork 仓库：`https://github.com/CharleyLeo/ClaudePet`）。
 - `npm install` 后运行 `npm test`，确认 install/uninstall、状态机、宠物 manifest、transcript 解析都通过。
 - 运行 `npm start`，检查桌宠窗口、托盘菜单、设置中心「宠物 / 显示设置 / 使用统计」三个页签。
 - 运行 `node bin/claudepet.js doctor` 和 `node bin/claudepet.js pets`，确认 runtime、Electron 路径和内置宠物都可读。

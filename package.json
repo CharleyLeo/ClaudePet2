@@ -35,12 +35,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CharleyLeo/ClaudePet2.git"
+    "url": "git+https://github.com/CharleyLeo/ClaudePet.git"
   },
   "bugs": {
-    "url": "https://github.com/CharleyLeo/ClaudePet2/issues"
+    "url": "https://github.com/CharleyLeo/ClaudePet/issues"
   },
-  "homepage": "https://github.com/CharleyLeo/ClaudePet2#readme",
+  "homepage": "https://github.com/CharleyLeo/ClaudePet#readme",
   "devDependencies": {
     "electron": "^42.0.0"
   }
