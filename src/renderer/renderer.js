@@ -920,6 +920,7 @@ function renderAppearanceTab(config) {
           <span class="field-hint">当前 ${Math.round(Number(config.opacity) * 100)}%</span>
         </div>
         <label class="toggle with-toggle-icon">${icon("power")}<input type="checkbox" ${config.petVisible !== false ? "checked" : ""} data-config-bool="petVisible"> <span>显示桌宠（关闭即隐藏窗口）</span></label>
+        <label class="toggle with-toggle-icon">${icon("bell")}<input type="checkbox" ${config.soundWhenHidden !== false ? "checked" : ""} data-config-bool="soundWhenHidden"> <span>隐藏桌宠时仍播放提示音</span></label>
         <label class="toggle with-toggle-icon">${icon("pin")}<input type="checkbox" ${config.alwaysOnTop ? "checked" : ""} data-config-bool="alwaysOnTop"> <span>总在最前</span></label>
         <label class="toggle with-toggle-icon">${icon("play")}<input type="checkbox" ${config.runOnDrag ? "checked" : ""} data-config-bool="runOnDrag"> <span>拖动时播放奔跑动画</span></label>
         <label class="toggle with-toggle-icon">${icon("panel")}<input type="checkbox" ${config.showPanel ? "checked" : ""} data-config-bool="showPanel"> <span>显示气泡面板</span></label>

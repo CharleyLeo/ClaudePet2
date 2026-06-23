@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   panelCompact: false,
   runOnDrag: true,
   petVisible: true,
+  soundWhenHidden: true,
   position: null,
   notifications: {
     system: true,

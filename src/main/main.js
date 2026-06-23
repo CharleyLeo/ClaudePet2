@@ -208,6 +208,8 @@ function playNotificationSound(category) {
   if (!petWindow || petWindow.isDestroyed()) return;
   const settings = (config.notifications && config.notifications.customSound) || {};
   if (!settings.enabled) return;
+  // 桌宠被隐藏时是否继续播放提示音：soundWhenHidden=false 则随桌宠一起静音（旧的"全关"行为）
+  if (config.petVisible === false && config.soundWhenHidden === false) return;
   petWindow.webContents.send("claudepet:play-sound", {
     preset: settings.preset || "ding",
     volume: typeof settings.volume === "number" ? settings.volume : 0.6,
@@ -328,7 +330,10 @@ function createPetWindow() {
     webPreferences: {
       preload: path.join(__dirname, "..", "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // 隐藏桌宠后仍需播放提示音：关闭后台节流，避免窗口 hide() 后渲染进程被挂起、
+      // Web Audio 的 AudioContext 随之停摆。隐藏时 rAF 本就不触发，CPU 开销可忽略。
+      backgroundThrottling: false
     }
   });
   applyWindowAppDetails(petWindow);

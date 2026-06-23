@@ -1,0 +1,7 @@
+[
+  { "id": "ding", "label": "叮咚", "file": "ding.wav" },
+  { "id": "bell", "label": "铃声", "file": "bell.wav" },
+  { "id": "chime", "label": "提示", "file": "chime.wav" },
+  { "id": "success", "label": "成功", "file": "success.wav" },
+  { "id": "task-complete", "label": "任务完成", "file": "task-complete.wav" }
+]

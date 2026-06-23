@@ -15,6 +15,8 @@
 - 八、自定义通知提示音（含 Web Audio 改造 + wav 峰值归一化脚本）
 - 九、批量优化（CSS 变量、sound manifest、滑条美化、Manager 懒加载、cwd 切换 reset）
 - 十、开关桌宠 + 关闭即真退出（paused 标记，命令行手动重启）
+- 十一、只藏桌宠不静音（关闭后台节流 + soundWhenHidden 开关）
+- 十二、state.json 并发损坏修复（原子写 + 坏文件自愈）
 
 ---
 
@@ -1225,3 +1227,269 @@ function setPetVisible(visible) {
 ### 单元验证
 
 `launch-flag` 的读/写/清/幂等用临时 `CLAUDEPET_HOME` 跑过断言，全部通过；`config.petVisible` 默认值确认为 `true`。
+
+---
+
+## 十一、只藏桌宠不静音（关闭后台节流 + soundWhenHidden 开关）
+
+> 第十节做了"开关桌宠"，但隐藏桌宠后**提示音也一起没了**。本节让"只藏桌宠、保留提示音"成为可选项。
+
+### 现象
+
+在「显示设置」取消勾选"显示桌宠"后，窗口消失，同时 Claude 完成 / 出错时的自定义提示音也不再响——表现为"一关全关"。用户希望能"只把桌宠藏起来，但提示音照常"。
+
+### 根因：不是逻辑挡的，是后台节流挂起了 Web Audio
+
+很容易误判成"`petVisible === false` 的分支把声音 return 掉了"。但看 `handleBridgeEvent` 的实际顺序，`maybeNotify`（内部已调用 `playNotificationSound`）是在 `petVisible` 判断**之前**就执行的：
+
+```js
+async function handleBridgeEvent(event) {
+  recordUsageFromEvent(event);
+  updateStateFromEvent(event);
+  broadcast();
+  maybeNotify(event.status);        // ← 播放声音在这里，早于下面的 return
+  if (config.petVisible === false) return;   // 只是跳过"自动弹出桌宠"
+  if (petWindow && !petWindow.isVisible()) petWindow.showInactive();
+}
+```
+
+所以逻辑上隐藏并不会拦掉声音。真凶是 Electron 的 **`backgroundThrottling`（默认 `true`）**：`petWindow.hide()` 后，这个隐藏窗口的渲染进程被整体节流 / 挂起，渲染进程里的 `AudioContext` 随之停摆，`source.start(0)` 出不了声。表现就成了"隐藏桌宠 = 连声音都没了"。
+
+> 副带知识点：窗口隐藏时 `requestAnimationFrame` 本就不触发（rAF 绑定到合成器/显示），所以关掉 `backgroundThrottling` 不会让桌宠动画在后台空转，CPU 开销可忽略；它主要影响的是定时器与音频，正是我们要保住的。
+
+### 方案：两步
+
+#### 1) 关掉隐藏窗口的后台节流
+
+`src/main/main.js` 的 `createPetWindow()` 给 `webPreferences` 加一行：
+
+```js
+webPreferences: {
+  preload: path.join(__dirname, "..", "preload.js"),
+  contextIsolation: true,
+  nodeIntegration: false,
+  // 隐藏桌宠后仍需播放提示音：关闭后台节流，避免窗口 hide() 后渲染进程被挂起、
+  // Web Audio 的 AudioContext 随之停摆。隐藏时 rAF 本就不触发，CPU 开销可忽略。
+  backgroundThrottling: false
+}
+```
+
+> 这是窗口**创建期**参数，对正在运行的实例不生效——需要退出后用 `claudepet start` 重新拉起才会带上。
+
+#### 2) 加显式开关 `soundWhenHidden`
+
+光关节流会让"隐藏时永远有声"，但用户可能也想要旧的"全关"。于是加一个可选开关，默认保留声音：
+
+`src/shared/config.js` 顶层新增：
+
+```js
+runOnDrag: true,
+petVisible: true,
+soundWhenHidden: true,   // 隐藏桌宠时是否仍播放提示音（默认是）
+position: null,
+```
+
+`src/main/main.js` 的 `playNotificationSound` 加门控：
+
+```js
+function playNotificationSound(category) {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const settings = (config.notifications && config.notifications.customSound) || {};
+  if (!settings.enabled) return;
+  // 桌宠被隐藏时是否继续播放提示音：soundWhenHidden=false 则随桌宠一起静音（旧的"全关"行为）
+  if (config.petVisible === false && config.soundWhenHidden === false) return;
+  petWindow.webContents.send("claudepet:play-sound", { ... });
+}
+```
+
+### UI
+
+「显示设置」开关区，"显示桌宠"下方新增一项：
+
+```html
+<label class="toggle with-toggle-icon">
+  ${icon("bell")}
+  <input type="checkbox" ${config.soundWhenHidden !== false ? "checked" : ""} data-config-bool="soundWhenHidden">
+  <span>隐藏桌宠时仍播放提示音</span>
+</label>
+```
+
+仍走通用的 `data-config-bool` → `update-config` 绑定：`update-config` 把 `config` 整体替换为合并后的新配置，所以下一次事件的 `playNotificationSound` 立刻读到最新的 `soundWhenHidden`，无需专门 IPC。
+
+### 三种组合一览
+
+| 显示桌宠 | 隐藏时仍播放提示音 | 效果 |
+| --- | --- | --- |
+| ✓ | —— | 正常显示 + 声音 |
+| ✗ | ✓（默认） | **只藏桌宠，提示音照响** ← 本节新增 |
+| ✗ | ✗ | 全关（第十节的旧行为，想要还能切回去） |
+
+> 提示音本身的总开关仍是「通知设置」里的 `customSound.enabled`，与本开关互不冲突：`enabled=false` 时无论桌宠显隐都不响。
+
+### 改动文件一览
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/shared/config.js` | 顶层加 `soundWhenHidden: true` |
+| `src/main/main.js` | `createPetWindow` 加 `backgroundThrottling: false`；`playNotificationSound` 加 `petVisible===false && soundWhenHidden===false` 静音门控 |
+| `src/renderer/renderer.js` | 「显示设置」加"隐藏桌宠时仍播放提示音"开关 |
+
+### 验证
+
+1. 退出桌宠，`claudepet start` 重新拉起（让 `backgroundThrottling: false` 生效）。
+2. 设置 → 显示设置 → 取消"显示桌宠"、保持勾选"隐藏桌宠时仍播放提示音"。
+3. 让 Claude 跑到完成 / 出错：窗口不出现，但提示音正常响。
+4. 再取消"隐藏桌宠时仍播放提示音"，重复任务：窗口不出现且不再响（回到旧的全关行为）。
+5. `node --check` 对 `config.js` / `main.js` / `renderer.js` 三个文件语法自检通过。
+
+---
+
+## 十二、state.json 并发损坏修复（原子写 + 坏文件自愈）
+
+> 来源问题报告：`docs/优化记录_ClaudePet2_state_json损坏_20260623.md`。
+> 现象是 Claude Code 状态栏整条**完全空白**——claude-hud 也被连带卡住，根因在 ClaudePet2 自己。
+
+### 现象与根因
+
+`~/.claudepet/state.json` 实际长度 16364 字符，预期约 16105 字符，**JSON 正常结束后被追加了一段 hook 的 raw stdin 文本**（对话内容片段）。再读时 `JSON.parse` 抛 `SyntaxError`，`readJson` 没接住直接向上抛，整个 statusline 链路死掉——而 statusLine 命令是 claude-hud 的转发入口，于是 claude-hud 也无内容输出，状态栏空白。
+
+```
+[claudepet] SyntaxError: Unexpected non-whitespace character after JSON at position 16105 (line 442 column 1)
+    at JSON.parse (<anonymous>)
+    at readJson (src/shared/json-file.js:10:17)
+    at loadRuntimeState (src/shared/runtime-state.js:27:35)
+    at mergeStatePatch (src/cli.js:79:19)
+    at statusLineCommand (src/cli.js:109:3)
+```
+
+底下是两个独立的缺陷叠加：
+
+1. **`writeJson` 不是原子写**：`fs.writeFileSync` 在 `O_WRONLY|O_CREAT|O_TRUNC` 下写大对象（state.json 十几 KB）并非单次 syscall。Claude Code 每次 hook + statusline 都会拉一个 `claudepet.js` 子进程；这些进程并发对同一个文件 truncate+write，会出现"进程 A 写 16105 字节 / 进程 B 同时 truncate 又只写到 16364 中段"这类混合产物，残留出一份长度不对、尾巴粘着另一个 payload 的坏文件。
+2. **`readJson` 不容错**：`JSON.parse` 失败直接 `throw`，**一次写坏 = 永久死锁**——直到有人手动 `echo '{}' > state.json` 才能复活。
+
+### 修复：`src/shared/json-file.js`
+
+只动 `json-file.js` 一个文件就覆盖所有 JSON 持久化路径（state.json / config.json / pets manifest 全走它）。
+
+#### 1) `writeJson` 改成 tmp + rename 原子写
+
+```js
+function writeJson(file, data) {
+  ensureDir(path.dirname(file));
+  const content = `${JSON.stringify(data, null, 2)}\n`;
+  // tmp 名包含 pid + 时间戳 + 随机数，确保跨进程、同进程多次写都不会撞名
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    fs.writeFileSync(tmp, content, "utf8");
+    try {
+      fs.renameSync(tmp, file);
+    } catch (renameError) {
+      // Windows 下目标可能被瞬时打开（reader 或并发 writer 的 rename）→ EBUSY/EPERM/EACCES
+      // 短窗口忙轮询 250ms 重试；最终失败才向上抛
+      const transient = renameError && (renameError.code === "EBUSY" || renameError.code === "EPERM" || renameError.code === "EACCES");
+      if (!transient) throw renameError;
+      const deadline = Date.now() + 250;
+      let lastError = renameError;
+      while (Date.now() < deadline) {
+        try { fs.renameSync(tmp, file); lastError = null; break; }
+        catch (retry) { lastError = retry; }
+      }
+      if (lastError) throw lastError;
+    }
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch (_) { /* ignore */ }
+    throw error;
+  }
+}
+```
+
+要点：
+
+- **rename 本身在同盘是原子的**：POSIX `rename(2)`、Windows `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` 都保证目标要么完整旧、要么完整新，绝不可能停在"半新半旧"。这条性质把"高频并发写"从"互相覆盖"降级到"最后一个赢家说了算"——后者完全可接受。
+- **tmp 名带 pid + ms + random**：同进程多次写串行没问题；不同进程同时写各用各的 tmp，不会撞名。
+- **EBUSY 重试**：Windows 下若另一个 reader 进程正巧打开目标文件，rename 会瞬时失败；250ms 内忙轮询能覆盖几乎所有现实抖动。
+- **失败清理 tmp**：避免 `.claudepet/` 目录里堆积孤儿 `.tmp.*` 文件。
+
+#### 2) `readJson` 捕获 SyntaxError + 备份坏文件
+
+```js
+function readJson(file, fallback = null) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error && error.code === "ENOENT") return fallback;
+    throw error;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      // 坏 JSON 留证据再返回 fallback：避免一次写坏（如 hook 并发互踩）就把整条
+      // statusline 链路永久阻断
+      try {
+        const backup = `${file}.broken.${Date.now()}`;
+        fs.renameSync(file, backup);
+        process.stderr.write(`[claudepet] corrupted JSON at ${file} moved to ${backup}\n`);
+      } catch (_) { /* 备份失败不阻塞主流程 */ }
+      return fallback;
+    }
+    throw error;
+  }
+}
+```
+
+要点：
+
+- `ENOENT` 仍走 fallback（首次启动等正常路径）；
+- 只对 `SyntaxError` 做自愈，其它 IO 异常向上抛；
+- 坏文件 rename 成 `.broken.<时间戳>`——保留证据供事后排查，但不再阻塞链路；
+- 提示信息写 stderr，运维能感知；写 stdout 会污染 statusline 的输出协议。
+
+### 验证
+
+新增并发压测脚本 `scripts/concurrent-write-test.js`，spawn N 个子进程同时反复 `readJson → mutate → writeJson` 同一文件，模拟 hook + statusline 并发：
+
+```
+$ node scripts/concurrent-write-test.js 8 200
+workers=8 iterations=200  elapsed=1675ms
+worker failures: 0
+final readJson OK: true
+final top-level keys: init, padding, updatedAt, w0, w1, w2, w3, w4, w5, w6, w7
+.broken.* files produced: 0
+.tmp.* orphan files: 0
+RESULT: PASS
+```
+
+8 进程 × 200 次 = 1600 次跨进程写入,1.7 秒跑完;零损坏、零 broken 备份、零孤儿 tmp。
+
+坏文件自愈路径单测（人为追加垃圾后再 readJson）:
+
+```
+corrupted file size: 141
+[claudepet] corrupted JSON at .tmp-broken-test.json moved to .tmp-broken-test.json.broken.1782183442529
+readJson result: {"recovered":true}        ← 返回 fallback,不再 throw
+broken backup count: 1                      ← 坏文件留证据
+second readJson: {"secondRead":true}        ← 第二次自然走 ENOENT → fallback
+```
+
+### 改动文件一览
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/shared/json-file.js` | `writeJson` 改 tmp+rename 原子写（含 EBUSY 重试 + tmp 清理）；`readJson` 捕获 SyntaxError，把坏文件 rename 成 `.broken.<ts>` 后返回 fallback |
+| `scripts/concurrent-write-test.js`（新增） | 并发写入压测脚本，spawn 子进程模拟 hook + statusline 并发，断言无损坏 |
+
+### 为什么没引入 `proper-lockfile`
+
+问题报告里建议过文件锁。当前方案不引入额外依赖也能跑通是因为：
+
+- rename 的原子性已经把"半新半旧"消除了，**最后写者获胜**就是预期语义（statusline 本就是高频覆盖的快照）；
+- read 容错把"已损坏文件"降级成"读到 fallback"，配合主进程内存里的 in-flight 状态不会丢业务数据；
+- 文件锁会引入跨进程协调成本，且在崩溃时锁残留是个新问题。
+
+如果将来出现"并发写 + 业务上必须保留每次写入内容"的场景（不是覆盖快照而是累积日志），再考虑改成 append-only 事件日志 + 启动折叠，或者上 `proper-lockfile`。
+
+### 相关历史
+
+事故详情见 `docs/优化记录_ClaudePet2_state_json损坏_20260623.md`。当时的临时处理是把坏文件备份到 `~/.claudepet/state.json.broken.20260623-104658` 并 `echo '{}'` 重置——本节修复后这种手动复活流程不再需要，自动走 `.broken.<ts>` 备份 + fallback 返回。
