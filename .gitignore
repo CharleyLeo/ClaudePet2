@@ -6,4 +6,4 @@ out/
 .claudepet/
 *.log
 /bash.exe.stackdump
-/.idea/db-forest-config.xml
+/.idea
