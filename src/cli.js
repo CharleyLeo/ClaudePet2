@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { loadConfig } = require("./shared/config");
 const { installSettings, uninstallSettings } = require("./shared/install");
@@ -40,19 +41,75 @@ function findBashShell() {
   return null;
 }
 
+function resolveHudIndex() {
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || claudeHome();
+    const base = path.join(configDir, "plugins", "cache");
+    if (!fs.existsSync(base)) return null;
+    let best = null;
+    for (const market of fs.readdirSync(base)) {
+      const hudBase = path.join(base, market, "claude-hud");
+      if (!fs.existsSync(hudBase)) continue;
+      for (const version of fs.readdirSync(hudBase)) {
+        const index = path.join(hudBase, version, "dist", "index.js");
+        if (!fs.existsSync(index)) continue;
+        // 与 claude-hud 原命令的 `sort -V | tail -1` 一致：取最高版本。
+        if (!best || version.localeCompare(best.version, undefined, { numeric: true }) > 0) {
+          best = { version, index };
+        }
+      }
+    }
+    return best ? best.index : null;
+  } catch {
+    return null;
+  }
+}
+
+function killProcessTree(child) {
+  try {
+    child.kill();
+  } catch {
+    // 忽略：进程可能已退出。
+  }
+  // Windows 下 child.kill() 只杀直接子进程，杀不掉 msys/shell 派生的进程树；taskkill /T 兜底。
+  if (process.platform === "win32" && child && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      // 忽略：taskkill 不可用时无兜底手段。
+    }
+  }
+}
+
 function runLegacyStatusLine(command, input, timeoutMs = 2200) {
   return new Promise((resolve) => {
     if (!command) return resolve(null);
-    const bash = findBashShell();
-    const child = bash
-      ? spawn(bash, ["-c", command], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
-      : spawn(command, [], { shell: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+    // Windows + claude-hud：直接用 node 运行插件入口，绕过 Git Bash。
+    // 原命令 `bash -c "…exec node …/dist/index.js"` 在 Windows(msys) 下有三个坑：
+    // ① msys 的 exec 会把 node 派生成新进程，child.kill()/超时杀不到 → 孤儿进程长期堆积；
+    // ② exec 切断 stdin 管道，node 读不到 JSON 而挂死；③ windowsHide 传不到派生进程 → 弹空白窗口。
+    // 直接 spawn(node) 后 child 就是真正的 node 子进程，三个问题一并消除。
+    const hudIndex =
+      process.platform === "win32" && /claude-hud/.test(command) ? resolveHudIndex() : null;
+    let child;
+    if (hudIndex) {
+      child = spawn(process.execPath, [hudIndex], {
+        stdio: ["pipe", "pipe", "ignore"],
+        windowsHide: true,
+        env: { ...process.env, COLUMNS: process.env.COLUMNS || "120" }
+      });
+    } else {
+      const bash = findBashShell();
+      child = bash
+        ? spawn(bash, ["-c", command], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
+        : spawn(command, [], { shell: true, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+    }
     let stdout = "";
     let done = false;
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      child.kill();
+      killProcessTree(child);
       resolve(null);
     }, timeoutMs);
     child.stdout.setEncoding("utf8");
@@ -71,7 +128,11 @@ function runLegacyStatusLine(command, input, timeoutMs = 2200) {
       clearTimeout(timer);
       resolve(stdout || null);
     });
-    child.stdin.end(input);
+    try {
+      child.stdin.end(input);
+    } catch {
+      // 忽略：子进程未就绪或已退出时写 stdin 会抛错。
+    }
   });
 }
 
